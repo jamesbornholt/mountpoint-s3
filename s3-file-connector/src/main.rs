@@ -1,6 +1,7 @@
 use std::io::{Read, Write};
 use std::os::unix::prelude::FromRawFd;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use std::{fs, fs::File};
@@ -309,7 +310,6 @@ fn mount(args: CliArgs) -> anyhow::Result<BackgroundSession> {
         addressing_style,
     )
     .context("Failed to create S3 client")?;
-    let runtime = client.event_loop_group();
 
     let mut filesystem_config = S3FilesystemConfig::default();
     if let Some(uid) = args.uid {
@@ -324,6 +324,14 @@ fn mount(args: CliArgs) -> anyhow::Result<BackgroundSession> {
     if let Some(file_mode) = args.file_mode {
         filesystem_config.file_mode = file_mode;
     }
+
+    let thread_count = args.thread_count.unwrap_or(1) as usize;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .max_blocking_threads(thread_count)
+        .worker_threads(thread_count)
+        .build()
+        .context("failed to create Tokio runtime")?;
+    let runtime = Arc::new(runtime);
 
     let fs = S3FuseFilesystem::new(
         client,
@@ -352,12 +360,7 @@ fn mount(args: CliArgs) -> anyhow::Result<BackgroundSession> {
 
     let session = Session::new(fs, &args.mount_point, &options).context("Failed to create FUSE session")?;
 
-    let session = if let Some(thread_count) = args.thread_count {
-        BackgroundSession::new_multi_thread(session, thread_count as usize)
-    } else {
-        BackgroundSession::new(session)
-    };
-    let session = session.context("Failed to start FUSE session")?;
+    let session = BackgroundSession::new(session).context("Failed to start FUSE session")?;
 
     tracing::info!("successfully mounted {:?}", args.mount_point);
 

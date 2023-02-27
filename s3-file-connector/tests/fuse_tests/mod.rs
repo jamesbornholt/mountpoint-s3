@@ -72,6 +72,7 @@ mod s3_session {
     use super::*;
 
     use std::future::Future;
+    use std::sync::Arc;
 
     use aws_sdk_s3::types::ByteStream;
     use aws_sdk_s3::Region;
@@ -86,7 +87,8 @@ mod s3_session {
 
         let client_config: S3ClientConfig = Default::default();
         let client = S3CrtClient::new(&region, client_config).unwrap();
-        let runtime = client.event_loop_group();
+
+        let runtime = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
 
         let options = vec![
             MountOption::RO,

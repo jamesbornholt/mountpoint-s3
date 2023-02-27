@@ -1,4 +1,3 @@
-use futures::task::Spawn;
 use nix::unistd::{getgid, getuid};
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -9,6 +8,7 @@ use tracing::{error, trace};
 use fuser::{FileAttr, KernelConfig};
 use s3_client::ObjectClient;
 
+use crate::future::Spawn;
 use crate::inode::{InodeError, InodeNo, InodeStat, InodeStatKind, ReaddirHandle, Superblock};
 use crate::prefetch::{PrefetchGetObject, PrefetchReadError, Prefetcher};
 use crate::sync::atomic::{AtomicI64, AtomicU64, Ordering};

@@ -20,12 +20,12 @@ use async_lock::RwLock;
 use bytes::{Bytes, BytesMut};
 use futures::pin_mut;
 use futures::stream::StreamExt;
-use futures::task::{Spawn, SpawnExt};
 use metrics::counter;
 use s3_client::{GetObjectError, ObjectClient, ObjectClientError};
 use thiserror::Error;
 use tracing::{debug_span, error, trace, Instrument};
 
+use crate::future::Spawn;
 use crate::prefetch::part::Part;
 use crate::prefetch::part_queue::PartQueue;
 use crate::sync::Arc;
@@ -281,7 +281,7 @@ where
         };
 
         // TODO hold onto this so we can cancel the task
-        self.inner.runtime.spawn(request_task).unwrap();
+        self.inner.runtime.spawn(request_task);
 
         // [read] will reset these if the reader stops making sequential requests
         self.next_request_offset += size;
@@ -589,18 +589,12 @@ mod tests {
     #[cfg(feature = "shuttle")]
     mod shuttle_tests {
         use super::*;
-        use futures::task::{FutureObj, SpawnError};
+
         use shuttle::future::block_on;
         use shuttle::rand::Rng;
         use shuttle::{check_pct, check_random};
 
-        struct ShuttleRuntime;
-        impl Spawn for ShuttleRuntime {
-            fn spawn_obj(&self, future: FutureObj<'static, ()>) -> Result<(), SpawnError> {
-                shuttle::future::spawn(future);
-                Ok(())
-            }
-        }
+        use crate::sync::ShuttleRuntime;
 
         fn sequential_read_stress_helper() {
             let mut rng = shuttle::rand::thread_rng();

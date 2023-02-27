@@ -4,6 +4,7 @@ use fuser::{BackgroundSession, MountOption, Session};
 use s3_client::{S3ClientConfig, S3CrtClient};
 use s3_file_connector::fuse::S3FuseFilesystem;
 use s3_file_connector::S3FilesystemConfig;
+use std::sync::Arc;
 use std::{
     fs::File,
     fs::OpenOptions,
@@ -154,7 +155,8 @@ fn mount_file_system(bucket_name: &str, region: &str, throughput_target_gbps: Op
         ..Default::default()
     };
     let client = S3CrtClient::new(region, config).expect("Failed to create S3 client");
-    let runtime = client.event_loop_group();
+
+    let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
 
     let mut options = vec![MountOption::RO, MountOption::FSName("fuse_sync".to_string())];
     options.push(MountOption::AutoUnmount);

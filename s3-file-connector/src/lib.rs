@@ -1,5 +1,6 @@
 pub mod fs;
 pub mod fuse;
+mod future;
 mod inode;
 pub mod metrics;
 pub mod prefetch;
