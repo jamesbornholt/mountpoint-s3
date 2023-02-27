@@ -12,7 +12,7 @@ use s3_client::ObjectClient;
 use crate::inode::{InodeError, InodeNo, InodeStat, InodeStatKind, ReaddirHandle, Superblock};
 use crate::prefetch::{PrefetchGetObject, PrefetchReadError, Prefetcher};
 use crate::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use crate::sync::{Arc, Mutex, RwLock};
+use crate::sync::{Arc, AsyncMutex, AsyncRwLock};
 
 // FIXME Use newtype here? Will add a bunch of .into()s...
 pub type Inode = u64;
@@ -45,7 +45,7 @@ struct FileHandle<Client: ObjectClient, Runtime> {
     ino: InodeNo,
     full_key: OsString,
     object_size: u64,
-    request: Mutex<Option<PrefetchGetObject<Client, Runtime>>>,
+    request: AsyncMutex<Option<PrefetchGetObject<Client, Runtime>>>,
 }
 
 #[derive(Debug)]
@@ -93,8 +93,8 @@ pub struct S3Filesystem<Client: ObjectClient, Runtime> {
     #[allow(unused)]
     prefix: String,
     next_handle: AtomicU64,
-    dir_handles: RwLock<HashMap<u64, Arc<DirHandle>>>,
-    file_handles: RwLock<HashMap<u64, FileHandle<Client, Runtime>>>,
+    dir_handles: AsyncRwLock<HashMap<u64, Arc<DirHandle>>>,
+    file_handles: AsyncRwLock<HashMap<u64, FileHandle<Client, Runtime>>>,
 }
 
 impl<Client, Runtime> S3Filesystem<Client, Runtime>
@@ -123,8 +123,8 @@ where
             bucket: bucket.to_string(),
             prefix: prefix.to_string(),
             next_handle: AtomicU64::new(1),
-            dir_handles: RwLock::new(HashMap::new()),
-            file_handles: RwLock::new(HashMap::new()),
+            dir_handles: AsyncRwLock::new(HashMap::new()),
+            file_handles: AsyncRwLock::new(HashMap::new()),
         }
     }
 
@@ -253,7 +253,7 @@ where
             object_size: lookup.stat.size as u64,
             request: Default::default(),
         };
-        self.file_handles.write().unwrap().insert(fh, handle);
+        self.file_handles.write().await.insert(fh, handle);
 
         Ok(Opened { fh, flags: 0 })
     }
@@ -277,16 +277,15 @@ where
             size
         );
 
-        let file_handles = self.file_handles.read().unwrap();
+        let file_handles = self.file_handles.read().await;
         if let Some(handle) = file_handles.get(&fh) {
-            let mut request = handle.request.lock().unwrap();
+            let mut request = handle.request.lock().await;
             if request.is_none() {
                 let key = std::str::from_utf8(handle.full_key.as_bytes()).unwrap();
                 *request = Some(self.prefetcher.get(&self.bucket, key, handle.object_size));
             }
-            match request.as_mut().unwrap().read(offset as u64, size as usize) {
+            match request.as_mut().unwrap().read(offset as u64, size as usize).await {
                 Ok(body) => reply.data(&body),
-                Err(PrefetchReadError::TimedOut) => reply.error(libc::ETIMEDOUT),
                 Err(PrefetchReadError::GetRequestFailed(_)) => reply.error(libc::EIO),
             }
         } else {
@@ -306,7 +305,7 @@ where
             offset: AtomicI64::new(0),
         };
 
-        let mut dir_handles = self.dir_handles.write().unwrap();
+        let mut dir_handles = self.dir_handles.write().await;
         dir_handles.insert(fh, Arc::new(handle));
 
         Ok(Opened { fh, flags: 0 })
@@ -322,7 +321,7 @@ where
         trace!("fs:readdir with ino {:?} fh {:?} offset {:?}", parent, fh, offset);
 
         let handle = {
-            let dir_handles = self.dir_handles.read().unwrap();
+            let dir_handles = self.dir_handles.read().await;
             dir_handles.get(&fh).cloned().ok_or(libc::EBADF)?
         };
 
@@ -390,7 +389,7 @@ where
         _flush: bool,
     ) -> Result<(), libc::c_int> {
         // TODO how do we cancel an inflight PrefetchingGetRequest?
-        let mut file_handles = self.file_handles.write().unwrap();
+        let mut file_handles = self.file_handles.write().await;
         let existed = file_handles.remove(&fh).is_some();
         assert!(existed, "releasing a file handle that doesn't exist?");
         Ok(())

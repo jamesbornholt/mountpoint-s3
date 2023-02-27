@@ -16,6 +16,7 @@ use std::fmt::Debug;
 use std::os::unix::prelude::OsStrExt;
 use std::time::Duration;
 
+use async_lock::RwLock;
 use bytes::{Bytes, BytesMut};
 use futures::pin_mut;
 use futures::stream::StreamExt;
@@ -27,7 +28,7 @@ use tracing::{debug_span, error, trace, Instrument};
 
 use crate::prefetch::part::Part;
 use crate::prefetch::part_queue::PartQueue;
-use crate::sync::{Arc, RwLock};
+use crate::sync::Arc;
 
 type TaskError<Client> = ObjectClientError<GetObjectError, <Client as ObjectClient>::ClientError>;
 
@@ -128,7 +129,7 @@ where
     /// Read some bytes from the object. Blocks until the desired bytes are available or EOF. This
     /// function will always return exactly `size` bytes, except at the end of the object where it
     /// will return however many bytes are left (including possibly 0 bytes).
-    pub fn read(&mut self, offset: u64, length: usize) -> Result<Bytes, PrefetchReadError<TaskError<Client>>> {
+    pub async fn read(&mut self, offset: u64, length: usize) -> Result<Bytes, PrefetchReadError<TaskError<Client>>> {
         trace!(
             offset,
             length,
@@ -153,14 +154,14 @@ where
             // TODO cancel inflight requests
             // TODO see if we can reuse any inflight requests rather than dropping them immediately
             self.current_task = None;
-            self.future_tasks.write().unwrap().drain(..);
+            self.future_tasks.write().await.drain(..);
             self.next_request_size = self.inner.config.first_request_size;
             self.next_sequential_read_offset = offset;
             self.next_request_offset = offset;
         }
         debug_assert_eq!(self.next_sequential_read_offset, offset);
 
-        self.prepare_requests();
+        self.prepare_requests().await;
 
         // If [prepare_requests] didn't spawn a request, then we must have reached the end of the
         // object.
@@ -174,11 +175,11 @@ where
             let current_task = self.current_task.as_mut().unwrap();
             debug_assert!(current_task.remaining > 0);
 
-            let part = match current_task.read(to_read as usize, self.inner.config.read_timeout) {
+            let part = match current_task.read(to_read as usize).await {
                 Err(e) => {
                     // cancel inflight tasks
                     self.current_task = None;
-                    self.future_tasks.write().unwrap().drain(..);
+                    self.future_tasks.write().await.drain(..);
                     return Err(e);
                 }
                 Ok(part) => part,
@@ -194,7 +195,7 @@ where
             response.extend_from_slice(&part_bytes[..]);
             to_read -= part_bytes.len() as u64;
             if current_task.remaining == 0 {
-                self.prepare_requests();
+                self.prepare_requests().await;
                 if self.current_task.is_none() {
                     break;
                 }
@@ -205,11 +206,11 @@ where
     }
 
     /// Runs on every read to prepare and spawn any requests our prefetching logic requires
-    fn prepare_requests(&mut self) {
+    async fn prepare_requests(&mut self) {
         let current_task = self.current_task.as_ref();
         if current_task.map(|task| task.remaining == 0).unwrap_or(true) {
             // There's no current task, or the current task is finished. Prepare the next request.
-            if let Some(next_task) = self.future_tasks.write().unwrap().pop_front() {
+            if let Some(next_task) = self.future_tasks.write().await.pop_front() {
                 self.current_task = Some(next_task);
                 return;
             }
@@ -217,12 +218,12 @@ where
         } else if current_task
             .map(|task| task.remaining < task.total_size / 2)
             .unwrap_or(false)
-            && self.future_tasks.read().unwrap().is_empty()
+            && self.future_tasks.read().await.is_empty()
         {
             // The current task is nearing completion, so pre-spawn the next request in anticipation
             // of it completing.
             if let Some(task) = self.spawn_next_request() {
-                self.future_tasks.write().unwrap().push_back(task);
+                self.future_tasks.write().await.push_back(task);
             }
         }
     }
@@ -303,8 +304,8 @@ struct RequestTask<E> {
 }
 
 impl<E: std::error::Error + Send + Sync> RequestTask<E> {
-    fn read(&mut self, length: usize, timeout: Duration) -> Result<Part, PrefetchReadError<E>> {
-        let part = self.part_queue.read(length, timeout)?;
+    async fn read(&mut self, length: usize) -> Result<Part, PrefetchReadError<E>> {
+        let part = self.part_queue.read(length).await?;
         debug_assert!(part.len() <= self.remaining);
         self.remaining -= part.len();
         Ok(part)
@@ -313,8 +314,6 @@ impl<E: std::error::Error + Send + Sync> RequestTask<E> {
 
 #[derive(Debug, Error)]
 pub enum PrefetchReadError<E: std::error::Error> {
-    #[error("timed out waiting to read")]
-    TimedOut,
     #[error("get request failed")]
     GetRequestFailed(#[from] E),
 }
@@ -322,7 +321,7 @@ pub enum PrefetchReadError<E: std::error::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::executor::ThreadPool;
+    use futures::executor::{block_on, ThreadPool};
     use proptest::proptest;
     use proptest::sample::SizeRange;
     use proptest::strategy::{Just, Strategy};
@@ -365,7 +364,7 @@ mod tests {
 
         let mut next_offset = 0;
         loop {
-            let buf = request.read(next_offset, read_size).unwrap();
+            let buf = block_on(request.read(next_offset, read_size)).unwrap();
             if buf.is_empty() {
                 break;
             }
@@ -437,7 +436,7 @@ mod tests {
 
         let mut next_offset = 0;
         loop {
-            let buf = match request.read(next_offset, read_size) {
+            let buf = match block_on(request.read(next_offset, read_size)) {
                 Ok(buf) => buf,
                 Err(_) => break,
             };
@@ -533,7 +532,7 @@ mod tests {
             assert!(offset < object_size);
             assert!(offset + length as u64 <= object_size);
             let expected = ramp_bytes((0xaa + offset) as usize, length);
-            let buf = request.read(offset, length).unwrap();
+            let buf = block_on(request.read(offset, length)).unwrap();
             assert_eq!(buf.len(), expected.len());
             // Don't spew the giant buffer if this test fails
             if buf[..] != expected[..] {
@@ -591,6 +590,7 @@ mod tests {
     mod shuttle_tests {
         use super::*;
         use futures::task::{FutureObj, SpawnError};
+        use shuttle::future::block_on;
         use shuttle::rand::Rng;
         use shuttle::{check_pct, check_random};
 
@@ -632,7 +632,7 @@ mod tests {
             let mut next_offset = 0;
             loop {
                 let read_size = rng.gen_range(1usize..5 * 1024 * 1024);
-                let buf = request.read(next_offset, read_size).unwrap();
+                let buf = block_on(request.read(next_offset, read_size)).unwrap();
                 if buf.is_empty() {
                     break;
                 }
@@ -684,7 +684,7 @@ mod tests {
                 let offset = rng.gen_range(0u64..object_size);
                 let length = rng.gen_range(1usize..(object_size - offset + 1) as usize);
                 let expected = ramp_bytes((0xaa + offset) as usize, length);
-                let buf = request.read(offset, length).unwrap();
+                let buf = block_on(request.read(offset, length)).unwrap();
                 assert_eq!(buf.len(), expected.len());
                 // Don't spew the giant buffer if this test fails
                 if buf[..] != expected[..] {
