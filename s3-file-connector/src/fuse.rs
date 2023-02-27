@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use std::time::Duration;
-use tracing::instrument;
+use tracing::{instrument, Instrument};
 
 use crate::fs::{DirectoryReplier, Inode, ReadReplier, S3Filesystem, S3FilesystemConfig};
 use crate::future::Spawn;
@@ -35,41 +35,50 @@ where
     #[instrument(level = "debug", skip_all)]
     fn init(&mut self, _req: &Request<'_>, config: &mut KernelConfig) -> Result<(), libc::c_int> {
         let fs = self.fs.clone();
-        self.runtime.block_on(fs.init(config))
+        self.runtime.block_on(fs.init(config).in_current_span())
     }
 
     #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=parent, name=?name))]
     fn lookup(&mut self, _req: &Request<'_>, parent: Inode, name: &OsStr, reply: ReplyEntry) {
         let fs = self.fs.clone();
         let name = name.to_owned();
-        self.runtime.spawn(async move {
-            match fs.lookup(parent, &name).await {
-                Ok(entry) => reply.entry(&entry.ttl, &entry.attr, entry.generation),
-                Err(e) => reply.error(e),
+        self.runtime.spawn(
+            async move {
+                match fs.lookup(parent, &name).await {
+                    Ok(entry) => reply.entry(&entry.ttl, &entry.attr, entry.generation),
+                    Err(e) => reply.error(e),
+                }
             }
-        });
+            .in_current_span(),
+        );
     }
 
     #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=ino))]
     fn getattr(&mut self, _req: &Request<'_>, ino: Inode, reply: ReplyAttr) {
         let fs = self.fs.clone();
-        self.runtime.spawn(async move {
-            match fs.getattr(ino).await {
-                Ok(attr) => reply.attr(&attr.ttl, &attr.attr),
-                Err(e) => reply.error(e),
+        self.runtime.spawn(
+            async move {
+                match fs.getattr(ino).await {
+                    Ok(attr) => reply.attr(&attr.ttl, &attr.attr),
+                    Err(e) => reply.error(e),
+                }
             }
-        });
+            .in_current_span(),
+        );
     }
 
     #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=ino))]
     fn open(&mut self, _req: &Request<'_>, ino: Inode, flags: i32, reply: ReplyOpen) {
         let fs = self.fs.clone();
-        self.runtime.spawn(async move {
-            match fs.open(ino, flags).await {
-                Ok(opened) => reply.opened(opened.fh, opened.flags),
-                Err(e) => reply.error(e),
+        self.runtime.spawn(
+            async move {
+                match fs.open(ino, flags).await {
+                    Ok(opened) => reply.opened(opened.fh, opened.flags),
+                    Err(e) => reply.error(e),
+                }
             }
-        });
+            .in_current_span(),
+        );
     }
 
     #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, offset=offset, size=size))]
@@ -85,51 +94,57 @@ where
         reply: ReplyData,
     ) {
         let fs = self.fs.clone();
-        self.runtime.spawn(async move {
-            let mut bytes_sent = 0;
+        self.runtime.spawn(
+            async move {
+                let mut bytes_sent = 0;
 
-            struct Replied(());
+                struct Replied(());
 
-            struct ReplyRead<'a> {
-                inner: fuser::ReplyData,
-                bytes_sent: &'a mut usize,
-            }
-
-            impl ReadReplier for ReplyRead<'_> {
-                type Replied = Replied;
-
-                fn data(self, data: &[u8]) -> Replied {
-                    self.inner.data(data);
-                    *self.bytes_sent = data.len();
-                    Replied(())
+                struct ReplyRead<'a> {
+                    inner: fuser::ReplyData,
+                    bytes_sent: &'a mut usize,
                 }
 
-                fn error(self, error: libc::c_int) -> Replied {
-                    self.inner.error(error);
-                    Replied(())
+                impl ReadReplier for ReplyRead<'_> {
+                    type Replied = Replied;
+
+                    fn data(self, data: &[u8]) -> Replied {
+                        self.inner.data(data);
+                        *self.bytes_sent = data.len();
+                        Replied(())
+                    }
+
+                    fn error(self, error: libc::c_int) -> Replied {
+                        self.inner.error(error);
+                        Replied(())
+                    }
                 }
+
+                let replier = ReplyRead {
+                    inner: reply,
+                    bytes_sent: &mut bytes_sent,
+                };
+                fs.read(ino, fh, offset, size, flags, lock, replier).await;
+                // return value of read is proof a reply was sent
+
+                metrics::counter!("fuse.bytes_read", bytes_sent as u64);
             }
-
-            let replier = ReplyRead {
-                inner: reply,
-                bytes_sent: &mut bytes_sent,
-            };
-            fs.read(ino, fh, offset, size, flags, lock, replier).await;
-            // return value of read is proof a reply was sent
-
-            metrics::counter!("fuse.bytes_read", bytes_sent as u64);
-        });
+            .in_current_span(),
+        );
     }
 
     #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=parent))]
     fn opendir(&mut self, _req: &Request<'_>, parent: Inode, flags: i32, reply: ReplyOpen) {
         let fs = self.fs.clone();
-        self.runtime.spawn(async move {
-            match fs.opendir(parent, flags).await {
-                Ok(opened) => reply.opened(opened.fh, opened.flags),
-                Err(e) => reply.error(e),
+        self.runtime.spawn(
+            async move {
+                match fs.opendir(parent, flags).await {
+                    Ok(opened) => reply.opened(opened.fh, opened.flags),
+                    Err(e) => reply.error(e),
+                }
             }
-        });
+            .in_current_span(),
+        );
     }
 
     #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=parent, fh=fh, offset=offset))]
@@ -153,14 +168,17 @@ where
         }
 
         let fs = self.fs.clone();
-        self.runtime.spawn(async move {
-            let replier = ReplyDirectory { inner: &mut reply };
+        self.runtime.spawn(
+            async move {
+                let replier = ReplyDirectory { inner: &mut reply };
 
-            match fs.readdir(parent, fh, offset, replier).await {
-                Ok(_) => reply.ok(),
-                Err(e) => reply.error(e),
+                match fs.readdir(parent, fh, offset, replier).await {
+                    Ok(_) => reply.ok(),
+                    Err(e) => reply.error(e),
+                }
             }
-        });
+            .in_current_span(),
+        );
     }
 
     #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=parent, fh=fh, offset=offset))]
@@ -191,14 +209,17 @@ where
         }
 
         let fs = self.fs.clone();
-        self.runtime.spawn(async move {
-            let replier = ReplyDirectoryPlus { inner: &mut reply };
+        self.runtime.spawn(
+            async move {
+                let replier = ReplyDirectoryPlus { inner: &mut reply };
 
-            match fs.readdir(parent, fh, offset, replier).await {
-                Ok(_) => reply.ok(),
-                Err(e) => reply.error(e),
+                match fs.readdir(parent, fh, offset, replier).await {
+                    Ok(_) => reply.ok(),
+                    Err(e) => reply.error(e),
+                }
             }
-        });
+            .in_current_span(),
+        );
     }
 
     #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=ino, fh=fh))]
@@ -213,11 +234,14 @@ where
         reply: ReplyEmpty,
     ) {
         let fs = self.fs.clone();
-        self.runtime.spawn(async move {
-            match fs.release(ino, fh, flags, lock_owner, flush).await {
-                Ok(()) => reply.ok(),
-                Err(e) => reply.error(e),
+        self.runtime.spawn(
+            async move {
+                match fs.release(ino, fh, flags, lock_owner, flush).await {
+                    Ok(()) => reply.ok(),
+                    Err(e) => reply.error(e),
+                }
             }
-        });
+            .in_current_span(),
+        );
     }
 }
