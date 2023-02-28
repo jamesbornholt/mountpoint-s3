@@ -88,7 +88,12 @@ mod s3_session {
         let client_config: S3ClientConfig = Default::default();
         let client = S3CrtClient::new(&region, client_config).unwrap();
 
-        let runtime = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .build()
+                .unwrap(),
+        );
 
         let options = vec![
             MountOption::RO,
