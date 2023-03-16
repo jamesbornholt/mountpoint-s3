@@ -10,6 +10,8 @@ permissions:
 
 jobs:
   integration:
+    name:
     uses: ./.github/workflows/integration.yml
     with:
       environment: PR integration tests
+      ref: ${{ github.event.pull_request.head.sha }}

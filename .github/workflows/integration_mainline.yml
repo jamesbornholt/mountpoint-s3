@@ -2,6 +2,7 @@ name: Integration tests (mainline)
 
 on:
   push:
+    branches: ["main"]
 
 permissions:
   id-token: write
@@ -9,6 +10,8 @@ permissions:
 
 jobs:
   integration:
+    name:
     uses: ./.github/workflows/integration.yml
     with:
       environment: Mainline integration tests
+      ref: ${{ github.event.ref }}
