@@ -14,4 +14,4 @@ jobs:
     uses: ./.github/workflows/integration.yml
     with:
       environment: Mainline integration tests
-      ref: ${{ github.event.ref }}
+      ref: ${{ github.event.after }}

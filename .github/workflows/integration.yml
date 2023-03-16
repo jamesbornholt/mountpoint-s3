@@ -27,6 +27,8 @@ jobs:
     name: Integration tests
     runs-on: ubuntu-22.04
 
+    # We use environments to require approval to run integration tests on PRs, but not on pushes to
+    # `main` (which have been approved already since PRs are required for `main`).
     environment: ${{ inputs.environment }}
 
     strategy:
