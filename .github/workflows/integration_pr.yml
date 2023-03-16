@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   integration:
-    name:
+    name: Integration
     uses: ./.github/workflows/integration.yml
     with:
       environment: PR integration tests

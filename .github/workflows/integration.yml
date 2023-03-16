@@ -24,7 +24,7 @@ env:
 
 jobs:
   test:
-    name: Integration tests
+    name: Tests
     runs-on: ubuntu-22.04
 
     # We use environments to require approval to run integration tests on PRs, but not on pushes to
