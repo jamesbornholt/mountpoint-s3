@@ -5,10 +5,7 @@ on:
     inputs:
       environment:
         required: true
-        type: choice
-        options:
-          - Mainline integration tests
-          - PR integration tests
+        type: string
 
 env:
   RUST_BACKTRACE: 1
