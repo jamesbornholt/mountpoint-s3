@@ -1,0 +1,14 @@
+name: Integration tests (mainline)
+
+on:
+  push:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  integration:
+    uses: ./.github/workflows/integration.yml
+    with:
+      environment: Mainline integration tests
