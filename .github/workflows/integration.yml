@@ -57,7 +57,7 @@ jobs:
       with:
         toolchain: stable
         override: true
-    - name: Restore Cargo cache
+    - name: Restore Cargo cache cache cache
       id: restore-cargo-cache
       uses: actions/cache/restore@v3
       with:
