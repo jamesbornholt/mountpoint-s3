@@ -4,6 +4,10 @@ on:
   pull_request_target:
     branches: [ "main" ]
 
+permissions:
+  id-token: write
+  contents: read
+
 jobs:
   integration:
     name: Integration
