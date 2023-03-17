@@ -1,12 +1,8 @@
-name: Integration tests (mainline)
+name: Integration tests
 
 on:
   push:
-    branches: ["main"]
-
-permissions:
-  id-token: write
-  contents: read
+    branches: [ "main" ]
 
 jobs:
   integration:
