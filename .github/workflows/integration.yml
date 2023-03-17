@@ -20,6 +20,7 @@ env:
   S3_FORBIDDEN_BUCKET_NAME: s3-file-connector-github-test-bucket-forbidden
   S3_REGION: us-east-1
   RUST_FEATURES: fuse_tests,s3_tests
+  GITHUB_TOKEN: ${{ GITHUB_TOKEN }}
 
 
 jobs:
