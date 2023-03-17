@@ -121,7 +121,7 @@ jobs:
           ~/.cargo/registry/cache/
           ~/.cargo/git/db/
           target/
-        key: ${{ runner.os }}-${{ github.job }}-integration-${{ matrix.fuse }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-${{ github.job }}-integration-asan-cargo-${{ hashFiles('**/Cargo.lock') }}
     - name: Install fuse
       run: sudo apt-get install fuse3 libfuse3-dev
     - name: Install llvm-dev
