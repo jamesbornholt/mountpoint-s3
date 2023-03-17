@@ -13,5 +13,5 @@ jobs:
     name: Integration
     uses: ./.github/workflows/integration.yml
     with:
-      environment: PR integration tests
+      environment: Mainline integration tests
       ref: ${{ github.event.pull_request.head.sha }}
