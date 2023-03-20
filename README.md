@@ -1,4 +1,4 @@
-# Mountpoint for Amazon S3
+# Mountpoint for Amazon S3 
 
 [![CI Status](https://github.com/awslabs/mountpoint-s3/actions/workflows/integration_main.yml/badge.svg?branch=main)](https://github.com/awslabs/mountpoint-s3/actions/workflows/integration_main.yml)
 
