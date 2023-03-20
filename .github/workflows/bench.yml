@@ -1,7 +1,7 @@
 name: Benchmark
 
-# We use environments to require approval to run integration tests on PRs, but not on pushes to
-# `main` (which have been approved already since PRs are required for `main`).
+# We use environments to require approval to run benchmarks on PRs, but not on pushes to `main`
+# (which have been approved already since PRs are required for `main`).
 on:
   workflow_call:
     inputs:
