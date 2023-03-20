@@ -11,12 +11,6 @@ on:
         required: true
         type: string
 
-on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    types: [labeled, opened, reopened, synchronize]
-
 env:
   RUST_BACKTRACE: 1
   CARGO_TERM_COLOR: always
