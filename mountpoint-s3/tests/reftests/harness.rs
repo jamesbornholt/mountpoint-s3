@@ -14,26 +14,39 @@ use proptest::prelude::*;
 use proptest_derive::Arbitrary;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Debug;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, trace};
 
 /// Operations that the mutating proptests can perform on the file system.
 // TODO: mkdir, unlink
 // TODO: "reboot" (forget all the local inodes and re-bootstrap)
-// TODO: incremental writes (test partially written files)
 #[derive(Debug, Arbitrary)]
 pub enum Op {
+    /// Do an entire write in one step
     WriteFile(
         #[proptest(strategy = "valid_name_strategy()")] String,
         DirectoryIndex,
         FileContent,
     ),
+
+    // Individual steps of a file write -- create, open, write, close
+    CreateFile(
+        #[proptest(strategy = "valid_name_strategy()")] String,
+        DirectoryIndex,
+        FileContent,
+    ),
+    StartWriting(InflightWriteIndex),
+    // usize is the percentage of the file to write (taken modulo 101)
+    WritePart(InflightWriteIndex, usize),
+    FinishWrite(InflightWriteIndex),
+
+    Read(DirectoryIndex, FileIndex),
 }
 
 /// An index into the reference model's list of directories. We use this to randomly select an
 /// existing directory to operate on (for put, rmdir, etc).
-#[derive(Debug, Arbitrary)]
+#[derive(Debug, Clone, Copy, Arbitrary)]
 pub struct DirectoryIndex(usize);
 
 impl DirectoryIndex {
@@ -47,11 +60,78 @@ impl DirectoryIndex {
     }
 }
 
+/// An index into the children of a directory
+#[derive(Debug, Clone, Copy, Arbitrary)]
+pub struct FileIndex(usize);
+
+impl FileIndex {
+    fn get<'a>(&self, reference: &'a BTreeMap<String, Node>) -> Option<(&'a str, &'a Node)> {
+        if reference.is_empty() {
+            None
+        } else {
+            let idx = self.0 % reference.len();
+            let key = reference.keys().nth(idx).unwrap();
+            Some((key, reference.get(key).unwrap()))
+        }
+    }
+}
+
+/// An index into the reference model's list of inflight writes. We use this to randomly select an
+/// inflight write to operate on.
+#[derive(Debug, Clone, Copy, Arbitrary)]
+pub struct InflightWriteIndex(usize);
+
+#[derive(Debug)]
+pub struct InflightWrite {
+    path: PathBuf,
+    inode: InodeNo,
+    /// Initially None until the file is opened by [Op::StartWriting]
+    file_handle: Option<u64>,
+    object: MockObject,
+    written: usize,
+}
+
+#[derive(Debug, Default)]
+struct InflightWrites {
+    writes: Vec<InflightWrite>,
+}
+
+impl InflightWrites {
+    fn index(&self, index: InflightWriteIndex) -> Option<usize> {
+        let inflight_writes_len = self.writes.len();
+        if inflight_writes_len == 0 {
+            None
+        } else {
+            Some(index.0 % inflight_writes_len)
+        }
+    }
+
+    fn insert(&mut self, write: InflightWrite) -> InflightWriteIndex {
+        self.writes.push(write);
+        InflightWriteIndex(self.writes.len() - 1)
+    }
+
+    fn get(&self, index: InflightWriteIndex) -> Option<&InflightWrite> {
+        Some(&self.writes[self.index(index)?])
+    }
+
+    fn get_mut(&mut self, index: InflightWriteIndex) -> Option<&mut InflightWrite> {
+        let index = self.index(index)?;
+        Some(&mut self.writes[index])
+    }
+
+    fn remove(&mut self, index: InflightWriteIndex) -> InflightWrite {
+        let index = self.index(index).unwrap();
+        self.writes.remove(index)
+    }
+}
+
 #[derive(Debug)]
 pub struct Harness {
     readdir_limit: usize, // max number of entries that a readdir will return; 0 means no limit
     reference: Reference,
     fs: S3Filesystem<Arc<MockClient>, ThreadPool>,
+    inflight_writes: InflightWrites,
 }
 
 impl Harness {
@@ -61,6 +141,7 @@ impl Harness {
             readdir_limit,
             reference,
             fs,
+            inflight_writes: Default::default(),
         }
     }
 
@@ -71,57 +152,28 @@ impl Harness {
             debug!(?op, "executing operation");
             match &op {
                 Op::WriteFile(name, directory_index, contents) => {
-                    let dir = directory_index.get(&self.reference);
-                    let full_path = dir.as_ref().join(name);
+                    let Some(index) = self.perform_create_file(name, *directory_index, contents).await else {
+                        continue;
+                    };
+                    self.perform_start_writing(index).await;
+                    self.perform_finish_write(index).await;
+                }
 
-                    // Find the inode for the directory by walking the file system tree
-                    let mut components = dir.as_ref().components();
-                    assert_eq!(components.next(), Some(Component::RootDir));
-                    let mut inode = FUSE_ROOT_INODE;
-                    for component in components {
-                        if let Component::Normal(folder) = component {
-                            inode = self
-                                .fs
-                                .lookup(inode, folder)
-                                .await
-                                .expect("directory must already exist")
-                                .attr
-                                .ino;
-                        } else {
-                            panic!("unexpected path component {component:?}");
-                        }
-                    }
-                    drop(dir);
+                Op::CreateFile(name, directory_index, contents) => {
+                    self.perform_create_file(name, *directory_index, contents).await;
+                }
+                Op::StartWriting(index) => {
+                    self.perform_start_writing(*index).await;
+                }
+                Op::WritePart(index, percent) => {
+                    self.perform_write_part(*index, *percent).await;
+                }
+                Op::FinishWrite(index) => {
+                    self.perform_finish_write(*index).await;
+                }
 
-                    // Random paths can shadow existing ones, so we check that we aren't allowed to
-                    // overwrite an existing inode. The existing node could be either a file or
-                    // directory; we should fail the same way in both cases.
-                    // TODO we have to get pretty lucky to hit this path right now -- try to bias the
-                    // search in this direction a bit.
-                    let reference_lookup = self.reference.lookup(&full_path);
-                    if reference_lookup.is_some() {
-                        let mknod = self.fs.mknod(inode, name.as_ref(), libc::S_IFREG, 0, 0).await;
-                        assert!(
-                            matches!(mknod, Err(libc::EEXIST)),
-                            "can't overwrite existing file/directory"
-                        );
-                    } else {
-                        let mknod = self.fs.mknod(inode, name.as_ref(), libc::S_IFREG, 0, 0).await.unwrap();
-                        let open = self.fs.open(mknod.attr.ino, libc::O_WRONLY).await.unwrap();
-
-                        // TODO try testing more than one `write` call
-                        let bytes = contents.to_boxed_slice();
-                        let write = self
-                            .fs
-                            .write(mknod.attr.ino, open.fh, 0, &bytes, 0, 0, None)
-                            .await
-                            .unwrap();
-                        assert_eq!(write as usize, bytes.len());
-
-                        self.fs.release(mknod.attr.ino, open.fh, 0, None, false).await.unwrap();
-
-                        self.reference.add_file(&full_path, contents);
-                    }
+                Op::Read(directory_index, file_index) => {
+                    self.perform_read(*directory_index, *file_index).await;
                 }
             }
 
@@ -165,9 +217,197 @@ impl Harness {
             Node::File(content) => {
                 assert_eq!(lookup.attr.kind, FileType::RegularFile);
                 match content {
-                    File::Local(_) => unimplemented!(),
+                    File::Local => (),
                     File::Remote(object) => self.compare_file(lookup.attr.ino, object).await,
                 }
+            }
+        }
+    }
+
+    /// Resolve an absolute path to an inode in the actual filesystem by recursively calling lookup
+    async fn lookup(&self, path: &Path) -> Result<InodeNo, libc::c_int> {
+        let mut components = path.components();
+        assert_eq!(components.next(), Some(Component::RootDir));
+        let mut inode = FUSE_ROOT_INODE;
+        for component in components {
+            if let Component::Normal(folder) = component {
+                inode = self.fs.lookup(inode, folder).await?.attr.ino;
+            } else {
+                panic!("unexpected path component {component:?}");
+            }
+        }
+        Ok(inode)
+    }
+
+    /// Create a new file ready for writing. We don't allow overwrites of existing files, so this
+    /// can return None if the name already exists in the chosen directory.
+    async fn perform_create_file(
+        &mut self,
+        name: &str,
+        directory_index: DirectoryIndex,
+        contents: &FileContent,
+    ) -> Option<InflightWriteIndex> {
+        let (dir_inode, full_path) = {
+            let dir = directory_index.get(&self.reference);
+            let dir_inode = self.lookup(dir.as_ref()).await.expect("directory must already exist");
+            let full_path = dir.as_ref().join(name);
+            (dir_inode, full_path)
+        };
+
+        // Random paths can shadow existing ones, so we check that we aren't allowed to overwrite an
+        // existing inode. The existing node could be either a file or directory; we should fail the
+        // same way in both cases.
+        let reference_lookup = self.reference.lookup(&full_path);
+        if reference_lookup.is_some() {
+            let mknod = self.fs.mknod(dir_inode, name.as_ref(), libc::S_IFREG, 0, 0).await;
+            assert!(
+                matches!(mknod, Err(libc::EEXIST)),
+                "can't overwrite existing file/directory"
+            );
+            None
+        } else {
+            let mknod = self
+                .fs
+                .mknod(dir_inode, name.as_ref(), libc::S_IFREG, 0, 0)
+                .await
+                .unwrap();
+
+            self.reference.add_file(&full_path, File::Local);
+
+            let index = self.inflight_writes.insert(InflightWrite {
+                path: full_path,
+                inode: mknod.attr.ino,
+                file_handle: None,
+                object: contents.to_mock_object(),
+                written: 0,
+            });
+
+            Some(index)
+        }
+    }
+
+    /// Open a previously created file (by `perform_create_file`) for writing
+    async fn perform_start_writing(&mut self, index: InflightWriteIndex) {
+        let Some(inflight_write) = self.inflight_writes.get(index) else {
+            return;
+        };
+
+        let open = self.fs.open(inflight_write.inode, libc::O_WRONLY).await;
+        if inflight_write.file_handle.is_some() {
+            // Shouldn't be able to reopen a file that's already open for writing
+            assert!(matches!(open, Err(libc::EPERM)));
+        } else {
+            let open = open.expect("open should succeed");
+            let inflight_write = self.inflight_writes.get_mut(index).unwrap();
+            inflight_write.file_handle = Some(open.fh);
+        }
+    }
+
+    /// Continue writing to an open file
+    async fn perform_write_part(&mut self, index: InflightWriteIndex, percent: usize) {
+        let Some(inflight_write) = self.inflight_writes.get(index) else {
+            // No inflight writes available
+            return;
+        };
+        let Some(file_handle) = inflight_write.file_handle else {
+            // File hasn't yet been opened for writing
+            return;
+        };
+        if inflight_write.written == inflight_write.object.len() {
+            // File is already fully written
+            return;
+        }
+
+        // Work out how many bytes to write. We never test empty writes, and also don't want to
+        // write beyond the end of the object, but want to be able to test writing the entire object
+        // in a single shot.
+        let percent = percent % 101; // Want to be able to hit 100%
+        let num_bytes_to_write = (percent * inflight_write.object.len() / 100).max(1);
+        let num_bytes_to_write = num_bytes_to_write.min(inflight_write.object.len() - inflight_write.written);
+        let bytes_to_write = inflight_write
+            .object
+            .read(inflight_write.written as u64, num_bytes_to_write);
+
+        let write = self
+            .fs
+            .write(
+                inflight_write.inode,
+                file_handle,
+                inflight_write.written as i64,
+                &bytes_to_write,
+                0,
+                0,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(write as usize, bytes_to_write.len());
+
+        let inflight_write = self.inflight_writes.get_mut(index).unwrap();
+        inflight_write.written += num_bytes_to_write;
+    }
+
+    /// Complete writing to a file (like `close`)
+    async fn perform_finish_write(&mut self, index: InflightWriteIndex) {
+        let Some(inflight_write) = self.inflight_writes.get(index) else {
+            // No inflight writes available
+            return;
+        };
+
+        // Start write if it hasn't already started
+        if inflight_write.file_handle.is_none() {
+            self.perform_start_writing(index).await;
+        }
+
+        // Finish whatever writes are remaining
+        let inflight_write = self.inflight_writes.get(index).unwrap();
+        if inflight_write.written != inflight_write.object.len() {
+            self.perform_write_part(index, 100).await;
+        }
+
+        let inflight_write = self.inflight_writes.get(index).unwrap();
+        let file_handle = inflight_write.file_handle.unwrap();
+        assert_eq!(inflight_write.written, inflight_write.object.len());
+
+        self.fs
+            .release(inflight_write.inode, file_handle, 0, None, false)
+            .await
+            .unwrap();
+
+        let inflight_write = self.inflight_writes.remove(index);
+
+        let Node::File(file) = self.reference.lookup_mut(&inflight_write.path).unwrap() else {
+            panic!("inflight writes must be to files");
+        };
+        *file = File::Remote(inflight_write.object);
+    }
+
+    async fn perform_read(&self, directory_index: DirectoryIndex, file_index: FileIndex) {
+        let dir_path = directory_index.get(&self.reference);
+        let Some(Node::Directory(dir_node)) = self.reference.lookup(dir_path.as_ref()) else {
+            panic!("directory must already exist");
+        };
+        let Some((name, Node::File(file))) = file_index.get(dir_node) else {
+            // It's either a directory or the [dir_node] is empty; nothing to test in either case
+            // TODO test readdir on directories to test mkdir
+            return;
+        };
+
+        let full_path = dir_path.as_ref().join(name);
+        trace!(path=?full_path, "read");
+
+        let inode = self.lookup(&full_path).await.expect("file should exist");
+
+        match file {
+            File::Local => {
+                // Local files should be stat-able, but unreaddable
+                let _stat = self.fs.getattr(inode).await.expect("stat should succeed");
+                let open = self.fs.open(inode, libc::O_RDONLY).await;
+                assert!(matches!(open, Err(libc::EPERM)));
+            }
+            File::Remote(object) => {
+                // Remote files should be readable
+                self.compare_file(inode, object).await;
             }
         }
     }
@@ -233,7 +473,8 @@ impl Harness {
                             if let Node::File(ref_object) = node {
                                 assert_eq!(attr.kind, FileType::RegularFile);
                                 match ref_object {
-                                    File::Local(_) => todo!("local files are not yet tested"),
+                                    // For local files (mid-write), we don't check anything except that they exist
+                                    File::Local => (),
                                     File::Remote(object) => self.compare_file(reply.ino, object).await,
                                 }
                             } else {
@@ -527,6 +768,47 @@ mod mutations {
             vec![
                 Op::WriteFile("-a".to_string(), DirectoryIndex(0), FileContent(0, FileSize::Small(0))),
                 Op::WriteFile("-a".to_string(), DirectoryIndex(0), FileContent(0, FileSize::Small(0))),
+            ],
+            0,
+        )
+    }
+
+    #[test]
+    fn regression_empty_file() {
+        run_test(
+            TreeNode::File(FileContent(0, FileSize::Small(0))),
+            vec![
+                Op::CreateFile("a".to_string(), DirectoryIndex(0), FileContent(0, FileSize::Small(0))),
+                Op::FinishWrite(InflightWriteIndex(0)),
+            ],
+            0,
+        )
+    }
+
+    #[test]
+    fn regression_out_of_order() {
+        run_test(
+            TreeNode::Directory(BTreeMap::from([(
+                Name("a".to_string()),
+                TreeNode::File(FileContent(0, FileSize::Small(0))),
+            )])),
+            vec![
+                Op::CreateFile("-".to_string(), DirectoryIndex(0), FileContent(0, FileSize::Small(0))),
+                Op::StartWriting(InflightWriteIndex(0)),
+                Op::WritePart(InflightWriteIndex(0), 0),
+                Op::WritePart(InflightWriteIndex(0), 0),
+            ],
+            0,
+        )
+    }
+
+    #[test]
+    fn regression_read_write() {
+        run_test(
+            TreeNode::File(FileContent(0, FileSize::Small(0))),
+            vec![
+                Op::WriteFile("a".to_string(), DirectoryIndex(0), FileContent(0, FileSize::Small(0))),
+                Op::Read(DirectoryIndex(0), FileIndex(0)),
             ],
             0,
         )
