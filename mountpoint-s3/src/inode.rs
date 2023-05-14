@@ -289,6 +289,8 @@ impl Superblock {
         dir_ino: InodeNo,
         page_size: usize,
     ) -> Result<ReaddirHandle, InodeError> {
+        assert!(page_size > 0);
+
         trace!(dir=?dir_ino, "readdir");
 
         let dir = self.inner.get(dir_ino)?;

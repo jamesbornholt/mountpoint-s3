@@ -2,6 +2,7 @@ use futures::task::Spawn;
 use nix::unistd::{getgid, getuid};
 use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::time::{Duration, UNIX_EPOCH};
 use tracing::{debug, error, trace};
@@ -62,7 +63,7 @@ pub struct S3FilesystemConfig {
     /// Stat time to live in kernel cache
     pub stat_ttl: Duration,
     /// Readdir page size
-    pub readdir_size: usize,
+    pub readdir_size: NonZeroUsize,
     /// User id
     pub uid: u32,
     /// Group id
@@ -85,7 +86,7 @@ impl Default for S3FilesystemConfig {
             // very small TTL, enough to debounce the FUSE requests while being much much smaller
             // than S3 ListObjects latency.
             stat_ttl: Duration::from_millis(1),
-            readdir_size: 100,
+            readdir_size: NonZeroUsize::new(1000).unwrap(),
             uid,
             gid,
             dir_mode: 0o755,
@@ -459,7 +460,10 @@ where
     pub async fn opendir(&self, parent: InodeNo, _flags: i32) -> Result<Opened, libc::c_int> {
         trace!("fs:opendir with parent {:?} flags {:?}", parent, _flags);
 
-        let inode_handle = self.superblock.readdir(&self.client, parent, 1000).await?;
+        let inode_handle = self
+            .superblock
+            .readdir(&self.client, parent, self.config.readdir_size.get())
+            .await?;
 
         let fh = self.next_handle();
         let handle = DirHandle {

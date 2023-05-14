@@ -14,6 +14,7 @@ use proptest::prelude::*;
 use proptest_derive::Arbitrary;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Debug;
+use std::num::NonZeroUsize;
 use std::path::{Component, Path};
 use std::sync::Arc;
 use tracing::debug;
@@ -47,21 +48,36 @@ impl DirectoryIndex {
     }
 }
 
+#[derive(Debug, Arbitrary)]
+pub struct HarnessConfig {
+    /// Size of the buffer passed to FUSE `readdir`. 0 means no limit.
+    #[proptest(strategy = "0..10usize")]
+    readdir_fuse_size: usize,
+    /// Max keys passed to ListObjectsV2
+    #[proptest(strategy = "1..10usize")]
+    readdir_list_objects_size: usize,
+}
+
+impl Default for HarnessConfig {
+    fn default() -> Self {
+        Self {
+            readdir_fuse_size: 5,
+            readdir_list_objects_size: 5,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Harness {
-    readdir_limit: usize, // max number of entries that a readdir will return; 0 means no limit
+    config: HarnessConfig,
     reference: Reference,
     fs: S3Filesystem<Arc<MockClient>, ThreadPool>,
 }
 
 impl Harness {
     /// Create a new test harness
-    pub fn new(fs: S3Filesystem<Arc<MockClient>, ThreadPool>, reference: Reference, readdir_limit: usize) -> Self {
-        Self {
-            readdir_limit,
-            reference,
-            fs,
-        }
+    pub fn new(fs: S3Filesystem<Arc<MockClient>, ThreadPool>, reference: Reference, config: HarnessConfig) -> Self {
+        Self { config, reference, fs }
     }
 
     /// Run a sequence of mutation operations on the test harness, checking equivalence between the
@@ -183,7 +199,7 @@ impl Harness {
             let children = ref_dir.children();
             let mut keys = children.keys().cloned().collect::<HashSet<_>>();
 
-            let mut reply = DirectoryReply::new(self.readdir_limit);
+            let mut reply = DirectoryReply::new(self.config.readdir_fuse_size);
             let _reply = self.fs.readdir(fs_dir, dir_handle, 0, &mut reply).await.unwrap();
 
             // TODO `stat` on these needs to work
@@ -305,10 +321,10 @@ mod read_only {
         },
     }
 
-    fn run_test(tree: TreeNode, check: CheckType, readdir_limit: usize) {
+    fn run_test(tree: TreeNode, check: CheckType, harness_config: HarnessConfig) {
         let test_prefix = Prefix::new("test_prefix/").expect("valid prefix");
         let config = S3FilesystemConfig {
-            readdir_size: 5,
+            readdir_size: NonZeroUsize::new(harness_config.readdir_list_objects_size).unwrap(),
             ..Default::default()
         };
         let (client, fs) = make_test_filesystem("harness", &test_prefix, config);
@@ -320,7 +336,7 @@ mod read_only {
 
         let reference = build_reference(namespace);
 
-        let harness = Harness::new(fs, reference, readdir_limit);
+        let harness = Harness::new(fs, reference, harness_config);
 
         futures::executor::block_on(async move {
             match check {
@@ -337,13 +353,13 @@ mod read_only {
         })]
 
         #[test]
-        fn reftest_random_tree_full(readdir_limit in 0..10usize, tree in gen_tree(5, 100, 5, 20)) {
-            run_test(tree, CheckType::FullTree, readdir_limit);
+        fn reftest_random_tree_full(tree in gen_tree(5, 100, 5, 20), config: HarnessConfig) {
+            run_test(tree, CheckType::FullTree, config);
         }
 
         #[test]
-        fn reftest_random_tree_single(tree in gen_tree(5, 100, 5, 20), path_index: usize) {
-            run_test(tree, CheckType::SinglePath { path_index }, 0);
+        fn reftest_random_tree_single(tree in gen_tree(5, 100, 5, 20), path_index: usize, config: HarnessConfig) {
+            run_test(tree, CheckType::SinglePath { path_index }, config);
         }
     }
 
@@ -358,7 +374,7 @@ mod read_only {
                 )])),
             )])),
             CheckType::FullTree,
-            0,
+            Default::default(),
         );
     }
 
@@ -379,7 +395,7 @@ mod read_only {
                 ),
             ])),
             CheckType::FullTree,
-            0,
+            Default::default(),
         );
     }
 
@@ -394,7 +410,7 @@ mod read_only {
                 )])),
             )])),
             CheckType::FullTree,
-            0,
+            Default::default(),
         );
     }
 
@@ -409,7 +425,7 @@ mod read_only {
                 )])),
             )])),
             CheckType::FullTree,
-            0,
+            Default::default(),
         )
     }
 
@@ -430,7 +446,7 @@ mod read_only {
                 ])),
             )])),
             CheckType::FullTree,
-            0,
+            Default::default(),
         )
     }
 
@@ -451,7 +467,31 @@ mod read_only {
                 ])),
             )])),
             CheckType::SinglePath { path_index: 1 },
-            0,
+            Default::default(),
+        )
+    }
+
+    #[test]
+    fn random_tree_regression_directory_page_size() {
+        run_test(
+            TreeNode::Directory(BTreeMap::from([(
+                Name("a".to_string()),
+                TreeNode::Directory(BTreeMap::from([
+                    (
+                        Name("a".to_string()),
+                        TreeNode::File(FileContent(0, FileSize::Small(0))),
+                    ),
+                    (
+                        Name("a/".to_string()),
+                        TreeNode::File(FileContent(0, FileSize::Small(0))),
+                    ),
+                ])),
+            )])),
+            CheckType::FullTree,
+            HarnessConfig {
+                readdir_fuse_size: 0,
+                readdir_list_objects_size: 1,
+            },
         )
     }
 }
@@ -462,10 +502,10 @@ mod mutations {
     use super::*;
     use proptest::collection::vec;
 
-    fn run_test(initial_tree: TreeNode, ops: Vec<Op>, readdir_limit: usize) {
+    fn run_test(initial_tree: TreeNode, ops: Vec<Op>, harness_config: HarnessConfig) {
         let test_prefix = Prefix::new("test_prefix/").expect("valid prefix");
         let config = S3FilesystemConfig {
-            readdir_size: 5,
+            readdir_size: NonZeroUsize::new(harness_config.readdir_list_objects_size).unwrap(),
             ..Default::default()
         };
         let (client, fs) = make_test_filesystem("harness", &test_prefix, config);
@@ -477,7 +517,7 @@ mod mutations {
 
         let reference = build_reference(namespace);
 
-        let mut harness = Harness::new(fs, reference, readdir_limit);
+        let mut harness = Harness::new(fs, reference, harness_config);
 
         futures::executor::block_on(harness.run(ops));
     }
@@ -489,8 +529,8 @@ mod mutations {
         })]
 
         #[test]
-        fn reftest_random_tree(tree in gen_tree(5, 100, 5, 20), readdir_limit in 0..10usize, ops in vec(any::<Op>(), 1..10)) {
-            run_test(tree, ops, readdir_limit);
+        fn reftest_random_tree(tree in gen_tree(5, 100, 5, 20), ops in vec(any::<Op>(), 1..10), config: HarnessConfig) {
+            run_test(tree, ops, config);
         }
     }
 
@@ -516,7 +556,7 @@ mod mutations {
                     FileContent(0x0b, FileSize::Small(10)),
                 ),
             ],
-            0,
+            Default::default(),
         );
     }
 
@@ -528,7 +568,7 @@ mod mutations {
                 Op::WriteFile("-a".to_string(), DirectoryIndex(0), FileContent(0, FileSize::Small(0))),
                 Op::WriteFile("-a".to_string(), DirectoryIndex(0), FileContent(0, FileSize::Small(0))),
             ],
-            0,
+            Default::default(),
         )
     }
 }
