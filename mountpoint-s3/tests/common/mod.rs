@@ -2,6 +2,7 @@ use aws_sdk_s3::types::ByteStream;
 use aws_sdk_s3::Region;
 use fuser::{FileAttr, FileType};
 use futures::executor::ThreadPool;
+use lazy_static::lazy_static;
 use mountpoint_s3::fs::{DirectoryReplier, ReadReplier};
 use mountpoint_s3::prefix::Prefix;
 use mountpoint_s3::{S3Filesystem, S3FilesystemConfig};
@@ -19,13 +20,41 @@ pub fn make_test_filesystem(
     prefix: &Prefix,
     config: S3FilesystemConfig,
 ) -> (Arc<MockClient>, S3Filesystem<Arc<MockClient>, ThreadPool>) {
+    make_test_filesystem_inner(
+        bucket,
+        prefix,
+        config,
+        ThreadPool::builder().pool_size(1).create().unwrap(),
+    )
+}
+
+/// Share a single runtime across all the tests that use `make_test_filesystem_shared_runtime`,
+/// because creating a runtime is fairly expensive, and e.g. the reftests create many file systems.
+pub fn make_test_filesystem_shared_runtime(
+    bucket: &str,
+    prefix: &Prefix,
+    config: S3FilesystemConfig,
+) -> (Arc<MockClient>, S3Filesystem<Arc<MockClient>, ThreadPool>) {
+    // Cloning a [ThreadPool] only clones a handle, so this pool will be shared by all callers
+    lazy_static! {
+        static ref TEST_FILESYSTEM_RUNTIME: ThreadPool = ThreadPool::builder().pool_size(1).create().unwrap();
+    }
+
+    make_test_filesystem_inner(bucket, prefix, config, TEST_FILESYSTEM_RUNTIME.clone())
+}
+
+fn make_test_filesystem_inner(
+    bucket: &str,
+    prefix: &Prefix,
+    config: S3FilesystemConfig,
+    runtime: ThreadPool,
+) -> (Arc<MockClient>, S3Filesystem<Arc<MockClient>, ThreadPool>) {
     let client_config = MockClientConfig {
         bucket: bucket.to_string(),
         part_size: 1024 * 1024,
     };
 
     let client = Arc::new(MockClient::new(client_config));
-    let runtime = ThreadPool::builder().pool_size(1).create().unwrap();
 
     let fs = S3Filesystem::new(Arc::clone(&client), runtime, bucket, prefix, config);
 

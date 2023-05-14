@@ -1827,6 +1827,7 @@ dependencies = [
  "futures",
  "hdrhistogram",
  "home",
+ "lazy_static",
  "libc",
  "metrics",
  "mountpoint-s3-client",

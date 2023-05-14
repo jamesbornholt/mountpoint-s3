@@ -1,4 +1,4 @@
-use crate::common::{make_test_filesystem, DirectoryReply, ReadReply};
+use crate::common::{make_test_filesystem_shared_runtime, DirectoryReply, ReadReply};
 use crate::reftests::generators::{flatten_tree, gen_tree, valid_name_strategy, FileContent, FileSize, Name, TreeNode};
 use crate::reftests::reference::{build_reference, File, Node, Reference};
 use fuser::FileType;
@@ -311,7 +311,7 @@ mod read_only {
             readdir_size: 5,
             ..Default::default()
         };
-        let (client, fs) = make_test_filesystem("harness", &test_prefix, config);
+        let (client, fs) = make_test_filesystem_shared_runtime("harness", &test_prefix, config);
 
         let namespace = flatten_tree(tree);
         for (key, object) in namespace.iter() {
@@ -468,7 +468,7 @@ mod mutations {
             readdir_size: 5,
             ..Default::default()
         };
-        let (client, fs) = make_test_filesystem("harness", &test_prefix, config);
+        let (client, fs) = make_test_filesystem_shared_runtime("harness", &test_prefix, config);
 
         let namespace = flatten_tree(initial_tree);
         for (key, object) in namespace.iter() {
