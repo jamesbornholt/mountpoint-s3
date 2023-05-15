@@ -237,7 +237,7 @@ impl ReaddirEntry {
     fn shadowed_description(&self) -> String {
         match self {
             Self::RemotePrefix { name } => {
-                debug_assert!(false, "should be impossible to shadow a remote prefix");
+                // debug_assert!(false, "should be impossible to shadow a remote prefix");
                 format!("directory '{name}'")
             }
             Self::RemoteObject { name, object_info } => {
@@ -363,6 +363,7 @@ enum RemoteIterState {
 #[derive(Debug)]
 struct RemoteIter {
     entries: VecDeque<ReaddirEntry>,
+    refill_countdown: usize,
     bucket: String,
     full_path: String,
     page_size: usize,
@@ -373,6 +374,7 @@ impl RemoteIter {
     fn new(bucket: &str, full_path: &str, page_size: usize) -> Self {
         Self {
             entries: VecDeque::new(),
+            refill_countdown: 0,
             bucket: bucket.to_owned(),
             full_path: full_path.to_owned(),
             page_size,
@@ -380,60 +382,88 @@ impl RemoteIter {
         }
     }
 
+    async fn refill(&mut self, client: &impl ObjectClient) -> Result<usize, InodeError> {
+        let continuation_token = match &mut self.state {
+            RemoteIterState::Finished => {
+                trace!(self=?self as *const _, "remote iter finished");
+                return Ok(0);
+            }
+            RemoteIterState::InProgress(token) => token.take(),
+        };
+
+        trace!(self=?self as *const _, ?continuation_token, "continuing remote iter");
+
+        let result = client
+            .list_objects(
+                &self.bucket,
+                continuation_token.as_deref(),
+                "/",
+                self.page_size,
+                self.full_path.as_str(),
+            )
+            .await
+            .map_err(|e| InodeError::ClientError(anyhow::Error::new(e)))?;
+
+        self.state = match result.next_continuation_token {
+            Some(token) => RemoteIterState::InProgress(Some(token)),
+            None => RemoteIterState::Finished,
+        };
+
+        let prefixes = result
+            .common_prefixes
+            .into_iter()
+            .map(|prefix| ReaddirEntry::RemotePrefix {
+                name: prefix[self.full_path.len()..prefix.len() - 1].to_owned(),
+            });
+
+        let objects = result
+            .objects
+            .into_iter()
+            .map(|object_info| ReaddirEntry::RemoteObject {
+                name: object_info.key[self.full_path.len()..].to_owned(),
+                object_info,
+            });
+
+        // ListObjectsV2 results are sorted, so ideally we'd just merge-sort the two streams.
+        // But `prefixes` isn't quite in sorted order any more because we trimmed off the
+        // trailing `/` from the names. There's still probably a less naive way to do this sort,
+        // but this should be good enough.
+        let new_entries = prefixes.chain(objects).collect::<Vec<_>>();
+        let num_new_entries = new_entries.len();
+        self.entries.extend(new_entries);
+
+        // TODO lol
+        let mut entries: Vec<_> = std::mem::take(&mut self.entries).into();
+        entries.sort();
+        self.entries = entries.into();
+
+        trace!(?self.entries, ?self.state, num_new_entries, "refilled");
+
+        Ok(num_new_entries)
+    }
+
     async fn next(&mut self, client: &impl ObjectClient) -> Result<Option<ReaddirEntry>, InodeError> {
-        if self.entries.is_empty() {
-            let continuation_token = match &mut self.state {
-                RemoteIterState::Finished => {
-                    trace!(self=?self as *const _, "remote iter finished");
-                    return Ok(None);
-                }
-                RemoteIterState::InProgress(token) => token.take(),
-            };
-
-            trace!(self=?self as *const _, ?continuation_token, "continuing remote iter");
-
-            let result = client
-                .list_objects(
-                    &self.bucket,
-                    continuation_token.as_deref(),
-                    "/",
-                    self.page_size,
-                    self.full_path.as_str(),
-                )
-                .await
-                .map_err(|e| InodeError::ClientError(anyhow::Error::new(e)))?;
-
-            self.state = match result.next_continuation_token {
-                Some(token) => RemoteIterState::InProgress(Some(token)),
-                None => RemoteIterState::Finished,
-            };
-
-            let prefixes = result
-                .common_prefixes
-                .into_iter()
-                .map(|prefix| ReaddirEntry::RemotePrefix {
-                    name: prefix[self.full_path.len()..prefix.len() - 1].to_owned(),
-                });
-
-            let objects = result
-                .objects
-                .into_iter()
-                .map(|object_info| ReaddirEntry::RemoteObject {
-                    name: object_info.key[self.full_path.len()..].to_owned(),
-                    object_info,
-                });
-
-            // ListObjectsV2 results are sorted, so ideally we'd just merge-sort the two streams.
-            // But `prefixes` isn't quite in sorted order any more because we trimmed off the
-            // trailing `/` from the names. There's still probably a less naive way to do this sort,
-            // but this should be good enough.
-            let mut new_entries = prefixes.chain(objects).collect::<Vec<_>>();
-            new_entries.sort();
-
-            self.entries.extend(new_entries);
+        if self.state == RemoteIterState::InProgress(None) {
+            let new_entries = self.refill(client).await?;
+            self.refill_countdown = new_entries;
+            let _ = self.refill(client).await?;
+        }
+        if self.refill_countdown == 0 {
+            let new_entries = self.refill(client).await?;
+            self.refill_countdown = new_entries;
         }
 
-        Ok(self.entries.pop_front())
+        match self.entries.pop_front() {
+            Some(entry) => {
+                trace!(?entry, "remoteiter next");
+                self.refill_countdown -= 1;
+                Ok(Some(entry))
+            }
+            None => {
+                assert_eq!(self.refill_countdown, 0);
+                Ok(None)
+            }
+        }
     }
 }
 

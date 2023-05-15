@@ -229,31 +229,37 @@ impl Harness {
                     offset = offset.max(reply.offset);
 
                     let name = &reply.name.as_os_str().to_str().unwrap().to_string();
-                    let fs_kind = reply.attr.kind;
-
-                    let lkup = self.fs.lookup(fs_dir, &reply.name).await.unwrap();
-                    let attr = lkup.attr;
 
                     match children.get(name) {
                         Some(node) => {
                             let ref_kind = node.file_type();
+
                             assert_eq!(
-                                fs_kind, ref_kind,
-                                "for file {name:?} expecting {ref_kind:?} found {fs_kind:?}"
+                                ref_kind, reply.attr.kind,
+                                "for file {:?} expecting {:?} but found {:?} from readdir",
+                                name, ref_kind, reply.attr.kind,
+                            );
+
+                            let lookup = self.fs.lookup(fs_dir, &reply.name).await.unwrap();
+
+                            assert_eq!(
+                                ref_kind, lookup.attr.kind,
+                                "for file {:?} expecting {:?} but found {:?} from lookup",
+                                name, ref_kind, lookup.attr.kind,
                             );
                             assert_eq!(
-                                attr.ino, reply.ino,
-                                "for file {:?} readdir ino {:?} lookup ino {:?}",
-                                name, reply.ino, attr.ino
+                                reply.attr.ino, lookup.attr.ino,
+                                "for file {:?} readdir ino {:?} != lookup ino {:?}",
+                                name, reply.attr.ino, lookup.attr.ino,
                             );
                             if let Node::File(ref_object) = node {
-                                assert_eq!(attr.kind, FileType::RegularFile);
+                                assert_eq!(lookup.attr.kind, FileType::RegularFile);
                                 match ref_object {
                                     File::Local(_) => todo!("local files are not yet tested"),
                                     File::Remote(object) => self.compare_file(reply.ino, object).await,
                                 }
                             } else {
-                                assert_eq!(attr.kind, FileType::Directory);
+                                assert_eq!(lookup.attr.kind, FileType::Directory);
                                 // Recurse into directory
                                 self.compare_contents_recursive(fs_dir, reply.ino, node).await;
                             }
