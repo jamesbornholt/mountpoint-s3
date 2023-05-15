@@ -867,3 +867,10 @@ impl<E: std::error::Error> From<UploadWriteError<E>> for i32 {
         }
     }
 }
+
+use mountpoint_s3_macros::instrument_request;
+
+#[instrument_request(args(a=b, c=d, e))]
+fn foobar(arg1: String, arg2: u64) -> u32 {
+    arg2 as u32
+}
