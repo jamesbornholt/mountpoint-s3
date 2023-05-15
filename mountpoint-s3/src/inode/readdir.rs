@@ -363,7 +363,7 @@ enum RemoteIterState {
 #[derive(Debug)]
 struct RemoteIter {
     entries: VecDeque<ReaddirEntry>,
-    refill_countdown: usize,
+    pages: VecDeque<usize>,
     bucket: String,
     full_path: String,
     page_size: usize,
@@ -374,7 +374,7 @@ impl RemoteIter {
     fn new(bucket: &str, full_path: &str, page_size: usize) -> Self {
         Self {
             entries: VecDeque::new(),
-            refill_countdown: 0,
+            pages: VecDeque::new(),
             bucket: bucket.to_owned(),
             full_path: full_path.to_owned(),
             page_size,
@@ -382,11 +382,22 @@ impl RemoteIter {
         }
     }
 
-    async fn refill(&mut self, client: &impl ObjectClient) -> Result<usize, InodeError> {
+    async fn refill(&mut self, client: &impl ObjectClient) -> Result<(), InodeError> {
+        trace!(?self.pages, ?self.entries, "refill");
+
+        if self.pages.front() > Some(&0) {
+            if self.pages.len() > 1 {
+                return Ok(());
+            }
+        }
+        else {
+            let _ = self.pages.pop_front();
+        }
+
         let continuation_token = match &mut self.state {
             RemoteIterState::Finished => {
                 trace!(self=?self as *const _, "remote iter finished");
-                return Ok(0);
+                return Ok(());
             }
             RemoteIterState::InProgress(token) => token.take(),
         };
@@ -439,28 +450,24 @@ impl RemoteIter {
 
         trace!(?self.entries, ?self.state, num_new_entries, "refilled");
 
-        Ok(num_new_entries)
+        self.pages.push_back(num_new_entries);
+
+        Ok(())
     }
 
     async fn next(&mut self, client: &impl ObjectClient) -> Result<Option<ReaddirEntry>, InodeError> {
-        if self.state == RemoteIterState::InProgress(None) {
-            let new_entries = self.refill(client).await?;
-            self.refill_countdown = new_entries;
-            let _ = self.refill(client).await?;
-        }
-        if self.refill_countdown == 0 {
-            let new_entries = self.refill(client).await?;
-            self.refill_countdown = new_entries;
+        for _ in 0..2 {
+            self.refill(client).await?;
         }
 
         match self.entries.pop_front() {
             Some(entry) => {
                 trace!(?entry, "remoteiter next");
-                self.refill_countdown -= 1;
+                *self.pages.front_mut().expect("should be pages remaining") -= 1;
                 Ok(Some(entry))
             }
             None => {
-                assert_eq!(self.refill_countdown, 0);
+                assert!(self.pages.is_empty());
                 Ok(None)
             }
         }

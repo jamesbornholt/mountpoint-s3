@@ -7,6 +7,7 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use std::collections::HashMap;
 use std::fs;
+use std::num::NonZeroUsize;
 use tempfile::TempDir;
 
 // Unit Tests
@@ -38,7 +39,7 @@ fn readdir<F>(creator_fn: F, prefix: &str, rng_seed: usize)
 where
     F: FnOnce(&str, S3FilesystemConfig) -> (TempDir, BackgroundSession, TestClientBox),
 {
-    let readdir_size = 5;
+    let readdir_size = NonZeroUsize::new(5).unwrap();
     let filesystem_config = S3FilesystemConfig {
         readdir_size,
         ..Default::default()
@@ -46,7 +47,7 @@ where
 
     let mut map = HashMap::new();
     let mut expected_list = Vec::new();
-    for i in 0..readdir_size * 4 {
+    for i in 0..readdir_size.get() * 4 {
         let mut rng = StdRng::seed_from_u64((rng_seed + i) as u64);
         let random_str = Alphanumeric.sample_string(&mut rng, 5);
         let file_name = format!("file_{random_str}_{i}");
@@ -71,7 +72,7 @@ fn readdir_while_writing<F>(creator_fn: F, prefix: &str, rng_seed: usize)
 where
     F: FnOnce(&str, S3FilesystemConfig) -> (TempDir, BackgroundSession, TestClientBox),
 {
-    let readdir_size = 5;
+    let readdir_size = NonZeroUsize::new(5).unwrap();
     let filesystem_config = S3FilesystemConfig {
         readdir_size,
         ..Default::default()
@@ -79,7 +80,7 @@ where
 
     let mut map = HashMap::new();
     let mut expected_list = Vec::new();
-    for i in 0..readdir_size * 4 {
+    for i in 0..readdir_size.get() * 4 {
         let mut rng = StdRng::seed_from_u64((rng_seed + i) as u64);
         let random_str = Alphanumeric.sample_string(&mut rng, 5);
         let file_name = format!("file_{random_str}_{i}");
@@ -94,7 +95,7 @@ where
     const OBJECT_SIZE: usize = 1024;
     // open some new files for write and leave it open
     let mut opened_files = Vec::new();
-    for i in 0..readdir_size {
+    for i in 0..readdir_size.get() {
         let mut rng = StdRng::seed_from_u64((rng_seed + map.len() + i) as u64);
         let random_str = Alphanumeric.sample_string(&mut rng, 8);
         let file_name = format!("file_{random_str}_{i}");

@@ -500,6 +500,34 @@ mod read_only {
             },
         )
     }
+
+    #[test]
+    fn random_tree_regression_directory_page_size2() {
+        run_test(
+            TreeNode::Directory(BTreeMap::from([(
+                Name("a".to_string()),
+                TreeNode::Directory(BTreeMap::from([
+                    (
+                        Name("a".to_string()),
+                        TreeNode::File(FileContent(0, FileSize::Small(0))),
+                    ),
+                    (
+                        Name("a-".to_string()),
+                        TreeNode::File(FileContent(0, FileSize::Small(0))),
+                    ),
+                    (
+                        Name("a/".to_string()),
+                        TreeNode::File(FileContent(0, FileSize::Small(0))),
+                    ),
+                ])),
+            )])),
+            CheckType::FullTree,
+            HarnessConfig {
+                readdir_fuse_size: 0,
+                readdir_list_objects_size: 1,
+            },
+        )
+    }
 }
 
 /// Mutation tests that run a sequence of mutations against a file system and check equivalence to
