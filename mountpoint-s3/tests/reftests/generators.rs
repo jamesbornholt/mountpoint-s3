@@ -67,11 +67,11 @@ pub fn gen_tree(depth: u32, max_size: u32, max_items: u32, max_width: usize) -> 
 }
 
 /// Take a generated tree and create the corresponding S3 namespace (list of keys)
-pub fn flatten_tree(node: TreeNode) -> Vec<(String, FileContent)> {
-    fn aux(node: TreeNode, path: String, acc: &mut Vec<(String, FileContent)>) {
+pub fn flatten_tree(node: TreeNode) -> Vec<(String, MockObject)> {
+    fn aux(node: TreeNode, path: String, acc: &mut Vec<(String, MockObject)>) {
         match node {
             TreeNode::File(content) => {
-                acc.push((path, content));
+                acc.push((path, content.to_mock_object()));
             }
             TreeNode::Directory(contents) => {
                 for (name, child) in contents {

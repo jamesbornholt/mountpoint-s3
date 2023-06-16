@@ -16,7 +16,7 @@ use tracing::{debug, trace};
 
 use crate::common::{make_test_filesystem, DirectoryReply, ReadReply};
 use crate::reftests::generators::{flatten_tree, gen_tree, valid_name_strategy, FileContent, FileSize, Name, TreeNode};
-use crate::reftests::reference::{build_reference, File, Node, Reference};
+use crate::reftests::reference::{File, Node, Reference};
 
 /// Operations that the mutating proptests can perform on the file system.
 // TODO: mkdir, readdir, unlink
@@ -274,7 +274,7 @@ impl Harness {
         } else {
             let mknod = mknod.expect("file creation should succeed");
 
-            self.reference.add_file(&full_path, File::Local);
+            self.reference.add_local_file(&full_path);
 
             let index = self.inflight_writes.insert(InflightWrite {
                 path: full_path,
@@ -380,11 +380,11 @@ impl Harness {
             .unwrap();
 
         let inflight_write = self.inflight_writes.remove(index);
-
-        let Node::File(file) = self.reference.lookup_mut(&inflight_write.path).unwrap() else {
-            panic!("inflight writes must be to files");
-        };
-        *file = File::Remote(inflight_write.object);
+        self.reference.remove_local_file(&inflight_write.path);
+        let key = inflight_write.path.to_string_lossy();
+        assert_eq!(key.chars().next(), Some('/'));
+        self.reference
+            .add_remote_key(key[1..].to_owned(), inflight_write.object);
     }
 
     /// Read a file from a directory
@@ -558,10 +558,10 @@ mod read_only {
 
         let namespace = flatten_tree(tree);
         for (key, object) in namespace.iter() {
-            client.add_object(&format!("{test_prefix}{key}"), object.to_mock_object());
+            client.add_object(&format!("{test_prefix}{key}"), object.clone());
         }
 
-        let reference = build_reference(namespace);
+        let reference = Reference::new(namespace);
 
         let harness = Harness::new(fs, reference, readdir_limit);
 
@@ -715,10 +715,10 @@ mod mutations {
 
         let namespace = flatten_tree(initial_tree);
         for (key, object) in namespace.iter() {
-            client.add_object(&format!("{test_prefix}{key}"), object.to_mock_object());
+            client.add_object(&format!("{test_prefix}{key}"), object.clone());
         }
 
-        let reference = build_reference(namespace);
+        let reference = Reference::new(namespace);
 
         let mut harness = Harness::new(fs, reference, readdir_limit);
 
