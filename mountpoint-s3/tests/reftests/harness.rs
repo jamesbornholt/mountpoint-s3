@@ -10,6 +10,7 @@ use mountpoint_s3::fs::{InodeNo, FUSE_ROOT_INODE};
 use mountpoint_s3::prefix::Prefix;
 use mountpoint_s3::{S3Filesystem, S3FilesystemConfig};
 use mountpoint_s3_client::mock_client::{MockClient, MockObject};
+use mountpoint_s3_client::ObjectClient;
 use proptest::prelude::*;
 use proptest_derive::Arbitrary;
 use tracing::{debug, trace};
@@ -45,6 +46,9 @@ pub enum Op {
     /// this as an explicit operation tests a different code path (doing recursive path resolution
     /// rather than walking the directory hierarchy with `readdir`).
     Read(DirectoryIndex, ChildIndex),
+
+    /// Delete an object from the S3 bucket
+    DeleteObject(RemoteKeyIndex),
 }
 
 /// An index into the reference model's list of directories. We use this to randomly select an
@@ -78,6 +82,26 @@ impl ChildIndex {
             let idx = self.0 % reference.len();
             let key = reference.keys().nth(idx).unwrap();
             Some((key, reference.get(key).unwrap()))
+        }
+    }
+}
+
+/// An index into the reference model's list of remote keys. We use this to random select an
+/// existing remote key to mutate.
+#[derive(Debug, Clone, Copy, Arbitrary)]
+pub struct RemoteKeyIndex(usize);
+
+impl RemoteKeyIndex {
+    /// Get the key at the given index in the reference S3 bucket (wrapping around if the index is
+    /// larger than the number of objects). Returns None if the S3 bucket is empty.
+    fn get<'a>(&self, reference: &'a Reference) -> Option<&'a str> {
+        let remote_keys = reference.remote_keys();
+        if remote_keys.is_empty() {
+            None
+        } else {
+            let idx = self.0 % remote_keys.len();
+            let key = &remote_keys[idx];
+            Some(&key.0)
         }
     }
 }
@@ -137,16 +161,26 @@ pub struct Harness {
     readdir_limit: usize, // max number of entries that a readdir will return; 0 means no limit
     reference: Reference,
     fs: S3Filesystem<Arc<MockClient>, ThreadPool>,
+    client: Arc<MockClient>,
+    bucket: String,
     inflight_writes: InflightWrites,
 }
 
 impl Harness {
     /// Create a new test harness
-    pub fn new(fs: S3Filesystem<Arc<MockClient>, ThreadPool>, reference: Reference, readdir_limit: usize) -> Self {
+    pub fn new(
+        fs: S3Filesystem<Arc<MockClient>, ThreadPool>,
+        client: Arc<MockClient>,
+        bucket: String,
+        reference: Reference,
+        readdir_limit: usize,
+    ) -> Self {
         Self {
             readdir_limit,
             reference,
             fs,
+            client,
+            bucket,
             inflight_writes: Default::default(),
         }
     }
@@ -179,6 +213,9 @@ impl Harness {
                 }
                 Op::Read(directory_index, file_index) => {
                     self.perform_read(*directory_index, *file_index).await;
+                }
+                Op::DeleteObject(key_index) => {
+                    self.perform_delete_object(*key_index).await;
                 }
             }
 
@@ -409,6 +446,23 @@ impl Harness {
         }
     }
 
+    /// Delete an object from the S3 bucket
+    async fn perform_delete_object(&mut self, key_index: RemoteKeyIndex) {
+        let Some(key) = key_index.get(&self.reference) else {
+            // No objects in the bucket
+            return;
+        };
+
+        let key = key.to_owned();
+        let _result = self
+            .client
+            .delete_object(&self.bucket, &key)
+            .await
+            .expect("DeleteObject always succeeds");
+
+        self.reference.remove_remote_key(&key);
+    }
+
     fn compare_contents_recursive<'a>(
         &'a self,
         fs_parent: InodeNo,
@@ -549,21 +603,23 @@ mod read_only {
     }
 
     fn run_test(tree: TreeNode, check: CheckType, readdir_limit: usize) {
-        let test_prefix = Prefix::new("test_prefix/").expect("valid prefix");
+        const BUCKET_NAME: &str = "reftest-bucket";
+
+        let test_prefix = Prefix::new("").expect("valid prefix");
         let config = S3FilesystemConfig {
             readdir_size: 5,
             ..Default::default()
         };
-        let (client, fs) = make_test_filesystem("harness", &test_prefix, config);
+        let (client, fs) = make_test_filesystem(BUCKET_NAME, &test_prefix, config);
 
         let namespace = flatten_tree(tree);
         for (key, object) in namespace.iter() {
-            client.add_object(&format!("{test_prefix}{key}"), object.clone());
+            client.add_object(key, object.clone());
         }
 
         let reference = Reference::new(namespace);
 
-        let harness = Harness::new(fs, reference, readdir_limit);
+        let harness = Harness::new(fs, client, BUCKET_NAME.to_owned(), reference, readdir_limit);
 
         futures::executor::block_on(async move {
             match check {
@@ -706,21 +762,23 @@ mod mutations {
     use proptest::collection::vec;
 
     fn run_test(initial_tree: TreeNode, ops: Vec<Op>, readdir_limit: usize) {
-        let test_prefix = Prefix::new("test_prefix/").expect("valid prefix");
+        const BUCKET_NAME: &str = "reftest-bucket";
+
+        let test_prefix = Prefix::new("").expect("valid prefix");
         let config = S3FilesystemConfig {
             readdir_size: 5,
             ..Default::default()
         };
-        let (client, fs) = make_test_filesystem("harness", &test_prefix, config);
+        let (client, fs) = make_test_filesystem(BUCKET_NAME, &test_prefix, config);
 
         let namespace = flatten_tree(initial_tree);
         for (key, object) in namespace.iter() {
-            client.add_object(&format!("{test_prefix}{key}"), object.clone());
+            client.add_object(key, object.clone());
         }
 
         let reference = Reference::new(namespace);
 
-        let mut harness = Harness::new(fs, reference, readdir_limit);
+        let mut harness = Harness::new(fs, client, BUCKET_NAME.to_owned(), reference, readdir_limit);
 
         futures::executor::block_on(harness.run(ops));
     }
@@ -800,6 +858,15 @@ mod mutations {
                 Op::WritePart(InflightWriteIndex(0), 0),
                 Op::WritePart(InflightWriteIndex(0), 0),
             ],
+            0,
+        )
+    }
+
+    #[test]
+    fn regression_delete_root_object() {
+        run_test(
+            TreeNode::File(FileContent(0, FileSize::Small(0))),
+            vec![Op::DeleteObject(RemoteKeyIndex(0))],
             0,
         )
     }

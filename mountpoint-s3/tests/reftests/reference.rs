@@ -173,8 +173,7 @@ impl Reference {
         self.materialized = self.rematerialize();
     }
 
-    #[allow(unused)] // Will be used when we add remote tests
-    pub fn remove_remote_key(&mut self, key: String) {
+    pub fn remove_remote_key(&mut self, key: &str) {
         let idx = self
             .remote_keys
             .iter()
@@ -208,6 +207,11 @@ impl Reference {
     /// always a valid directory, even in an empty file system.
     pub fn directories(&self) -> &[impl AsRef<Path>] {
         &self.materialized.directories
+    }
+
+    /// A list of remote keys in the reference.
+    pub fn remote_keys(&self) -> &[(String, MockObject)] {
+        &self.remote_keys
     }
 }
 
