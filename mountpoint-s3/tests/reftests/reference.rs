@@ -73,6 +73,14 @@ impl MaterializedReference {
             };
             let dir = dir.as_os_str().to_str().unwrap();
             if components.peek().is_none() {
+                // If both a local and a remote directory exist, don't overwrite the remote one's
+                // contents, as they will be visible even though the directory is local
+                if let Node::Directory(new_children) = &new_node {
+                    if let Some(Node::Directory(_)) = children.get(dir) {
+                        assert!(new_children.is_empty(), "local directories are always empty");
+                        break;
+                    }
+                }
                 children.insert(dir.to_owned(), new_node);
                 break;
             } else {
@@ -139,7 +147,6 @@ impl Reference {
         self.materialized = self.rematerialize();
     }
 
-    #[allow(unused)] // Will be used when we add mkdir tests
     pub fn add_local_directory(&mut self, path: impl AsRef<Path>) {
         let path = path.as_ref().to_owned();
         assert!(!self.local_directories.contains(&path), "duplicate local directory");

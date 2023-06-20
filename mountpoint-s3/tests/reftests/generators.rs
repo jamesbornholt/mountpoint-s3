@@ -21,6 +21,21 @@ pub fn name_strategy() -> impl Strategy<Value = String> {
 #[derive(Clone, Debug, Arbitrary, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Name(#[proptest(strategy = "name_strategy()")] pub String);
 
+impl<'a> From<&'a str> for Name {
+    fn from(value: &'a str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+#[derive(Clone, Debug, Arbitrary, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ValidName(#[proptest(strategy = "valid_name_strategy()")] pub String);
+
+impl<'a> From<&'a str> for ValidName {
+    fn from(value: &'a str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Arbitrary)]
 pub enum FileSize {
     Small(u8),
