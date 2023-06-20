@@ -36,6 +36,8 @@ pub enum Op {
 
     /// Create a local directory
     CreateDirectory(DirectoryIndex, ValidName),
+    /// Remove a local directory
+    RemoveDirectory(DirectoryIndex),
 
     /// Read a file. `compare_contents` already reads every file after every operation, but having
     /// this as an explicit operation tests a different code path (doing recursive path resolution
@@ -209,6 +211,9 @@ impl Harness {
                 Op::CreateDirectory(directory_index, name) => {
                     self.perform_create_directory(*directory_index, &name.0).await;
                 }
+                Op::RemoveDirectory(directory_index) => {
+                    self.perform_remove_directory(*directory_index).await;
+                }
                 Op::Read(directory_index, file_index) => {
                     self.perform_read(*directory_index, *file_index).await;
                 }
@@ -225,7 +230,7 @@ impl Harness {
     /// Walk the filesystem tree and check that at each level, contents match the reference
     pub async fn compare_contents(&self) {
         let root = self.reference.root();
-        self.compare_contents_recursive(FUSE_ROOT_INODE, FUSE_ROOT_INODE, root)
+        self.compare_contents_recursive(FUSE_ROOT_INODE, FUSE_ROOT_INODE, Path::new("/").to_owned(), root)
             .await;
     }
 
@@ -251,7 +256,7 @@ impl Harness {
         let lookup = self.fs.lookup(parent, path.last().unwrap().as_ref()).await.unwrap();
         assert!(seen_inos.insert(lookup.attr.ino));
         match node {
-            Node::Directory(_) => {
+            Node::Directory { .. } => {
                 assert_eq!(lookup.attr.kind, FileType::Directory);
             }
             Node::File(content) => {
@@ -448,10 +453,40 @@ impl Harness {
         }
     }
 
+    /// Remove a local directory
+    async fn perform_remove_directory(&mut self, directory_index: DirectoryIndex) {
+        let (parent_inode, full_path) = {
+            let full_path = directory_index.get(&self.reference);
+            if full_path.as_ref() == Path::new("/") {
+                // Can't remove the root directory
+                return;
+            }
+            let parent_path = full_path.as_ref().parent().expect("directory must have a parent");
+            let parent_inode = self.lookup(parent_path).await.expect("parent must exist");
+            (parent_inode, full_path.as_ref().to_owned())
+        };
+        trace!(path=?full_path, "remove directory");
+
+        let reference_lookup = self.reference.lookup(&full_path).expect("directory must already exist");
+        let Node::Directory { children, is_local } = reference_lookup else {
+            panic!("node must be a directory");
+        };
+
+        // Only empty local directories can be removed
+        let dir_name = full_path.file_name().expect("directory must have a name");
+        let rmdir = self.fs.rmdir(parent_inode, dir_name).await;
+        if *is_local && children.is_empty() {
+            assert_eq!(rmdir, Ok(()), "should be able to remove empty local directory");
+            self.reference.remove_local_directory(&full_path);
+        } else {
+            rmdir.expect_err("rmdir should fail");
+        }
+    }
+
     /// Read a file from a directory
     async fn perform_read(&self, directory_index: DirectoryIndex, file_index: ChildIndex) {
         let dir_path = directory_index.get(&self.reference);
-        let Some(Node::Directory(dir_node)) = self.reference.lookup(dir_path.as_ref()) else {
+        let Some(Node::Directory { children: dir_node , .. }) = self.reference.lookup(dir_path.as_ref()) else {
             panic!("directory must already exist");
         };
         let Some((name, Node::File(file))) = file_index.get(dir_node) else {
@@ -491,6 +526,7 @@ impl Harness {
         &'a self,
         fs_parent: InodeNo,
         fs_dir: InodeNo,
+        fs_dir_path: PathBuf,
         ref_dir: &'a Node,
     ) -> BoxFuture<'a, ()> {
         async move {
@@ -537,12 +573,12 @@ impl Harness {
                             let ref_kind = node.file_type();
                             assert_eq!(
                                 fs_kind, ref_kind,
-                                "for file {name:?} expecting {ref_kind:?} found {fs_kind:?}"
+                                "for file {name:?} in dir {fs_dir_path:?} expecting {ref_kind:?} found {fs_kind:?}"
                             );
                             assert_eq!(
                                 attr.ino, reply.ino,
-                                "for file {:?} readdir ino {:?} lookup ino {:?}",
-                                name, reply.ino, attr.ino
+                                "for file {:?} in dir {:?} readdir ino {:?} lookup ino {:?}",
+                                name, fs_dir_path, reply.ino, attr.ino
                             );
                             if let Node::File(ref_object) = node {
                                 assert_eq!(attr.kind, FileType::RegularFile);
@@ -553,11 +589,12 @@ impl Harness {
                             } else {
                                 assert_eq!(attr.kind, FileType::Directory);
                                 // Recurse into directory
-                                self.compare_contents_recursive(fs_dir, reply.ino, node).await;
+                                self.compare_contents_recursive(fs_dir, reply.ino, fs_dir_path.join(name), node)
+                                    .await;
                             }
                             assert!(keys.remove(name));
                         }
-                        None => panic!("file {name:?} not found in the reference"),
+                        None => panic!("file {name:?} in dir {fs_dir_path:?} not found in the reference"),
                     }
                 }
                 reply.clear();
@@ -566,7 +603,7 @@ impl Harness {
 
             assert!(
                 keys.is_empty(),
-                "reference contained elements not in the filesystem: {keys:?}"
+                "reference contained elements not in the filesystem dir {fs_dir_path:?}: {keys:?}"
             );
 
             self.fs.releasedir(fs_dir, dir_handle, 0).await.unwrap();
@@ -883,6 +920,68 @@ mod mutations {
                 Op::CreateDirectory(DirectoryIndex(0), "-".into()),
                 Op::WriteFile("-".into(), DirectoryIndex(1), FileContent(0, FileSize::Small(0))),
                 Op::WriteFile("a".into(), DirectoryIndex(0), FileContent(0, FileSize::Small(0))),
+            ],
+            0,
+        )
+    }
+
+    #[test]
+    fn regression_rmdir_duplicate() {
+        run_test(
+            TreeNode::File(FileContent(0, FileSize::Small(0))),
+            vec![
+                Op::CreateDirectory(DirectoryIndex(0), "-".into()),
+                Op::RemoveDirectory(DirectoryIndex(1)),
+            ],
+            0,
+        )
+    }
+
+    #[test]
+    fn regression_add_local_node() {
+        run_test(
+            TreeNode::File(FileContent(0, FileSize::Small(0))),
+            vec![
+                Op::CreateDirectory(DirectoryIndex(0), "-".into()),
+                Op::WriteFile("a".into(), DirectoryIndex(1), FileContent(0, FileSize::Small(0))),
+            ],
+            0,
+        )
+    }
+
+    #[test]
+    fn regression_rmdir_eperm() {
+        run_test(
+            TreeNode::Directory(BTreeMap::from([(
+                "a".into(),
+                TreeNode::Directory(BTreeMap::from([
+                    ("-".into(), TreeNode::File(FileContent(0, FileSize::Small(0)))),
+                    ("a".into(), TreeNode::File(FileContent(0, FileSize::Small(0)))),
+                ])),
+            )])),
+            vec![
+                Op::DeleteObject(RemoteKeyIndex(1)),
+                Op::CreateDirectory(DirectoryIndex(1), "a".into()),
+                Op::WriteFile("a".into(), DirectoryIndex(2), FileContent(0, FileSize::Small(0))),
+                Op::RemoveDirectory(DirectoryIndex(2)),
+            ],
+            0,
+        )
+    }
+
+    #[test]
+    fn regression_rmdir_delete_object() {
+        run_test(
+            TreeNode::Directory(BTreeMap::from([(
+                "a".into(),
+                TreeNode::Directory(BTreeMap::from([(
+                    "-".into(),
+                    TreeNode::File(FileContent(0, FileSize::Small(0))),
+                )])),
+            )])),
+            vec![
+                Op::CreateDirectory(DirectoryIndex(1), "a".into()),
+                Op::DeleteObject(RemoteKeyIndex(0)),
             ],
             0,
         )

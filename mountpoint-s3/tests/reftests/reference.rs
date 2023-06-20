@@ -13,7 +13,10 @@ pub enum File {
 
 #[derive(Debug)]
 pub enum Node {
-    Directory(BTreeMap<String, Node>),
+    Directory {
+        children: BTreeMap<String, Node>,
+        is_local: bool,
+    },
     File(File),
 }
 
@@ -21,7 +24,7 @@ impl Node {
     /// Returns the type of this node (file or directory)
     pub fn file_type(&self) -> FileType {
         match self {
-            Node::Directory(_) => FileType::Directory,
+            Node::Directory { .. } => FileType::Directory,
             Node::File(_) => FileType::RegularFile,
         }
     }
@@ -29,7 +32,7 @@ impl Node {
     /// Returns the children of a directory node (panics if node is a file)
     pub fn children(&self) -> &BTreeMap<String, Node> {
         match self {
-            Self::Directory(map) => map,
+            Self::Directory { children, .. } => children,
             Self::File(_) => panic!("unexpected file"),
         }
     }
@@ -60,31 +63,49 @@ struct MaterializedReference {
 }
 
 impl MaterializedReference {
-    /// Add a new node to the tree. All intermediate directories must already exist. If the path
-    /// already exists it will be overwritten.
+    /// Add a new node to the tree. Any missing intermediate directories will be created as local
+    /// directories. If the path already exists it will be overwritten, unless both the existing
+    /// and new nodes are directories.
     fn add_local_node(&mut self, path: impl AsRef<Path>, new_node: Node) {
         let mut components = path.as_ref().components().peekable();
         assert_eq!(components.next(), Some(Component::RootDir));
 
         let mut parent_node = &mut self.root;
         while let Some(dir) = components.next() {
-            let Node::Directory(children) = parent_node else {
+            let Node::Directory { children, .. } = parent_node else {
                 panic!("unexpected internal file node");
             };
             let dir = dir.as_os_str().to_str().unwrap();
             if components.peek().is_none() {
                 // If both a local and a remote directory exist, don't overwrite the remote one's
-                // contents, as they will be visible even though the directory is local
-                if let Node::Directory(new_children) = &new_node {
-                    if let Some(Node::Directory(_)) = children.get(dir) {
+                // contents, as they will be visible even though the directory is local. But
+                // remember the directory is still local.
+                if let Node::Directory {
+                    children: new_children,
+                    is_local: new_is_local,
+                } = &new_node
+                {
+                    if let Some(Node::Directory {
+                        is_local: curr_is_local,
+                        ..
+                    }) = children.get_mut(dir)
+                    {
                         assert!(new_children.is_empty(), "local directories are always empty");
+                        assert!(
+                            new_is_local,
+                            "add_local_node should only be called on local directories"
+                        );
+                        *curr_is_local = true;
                         break;
                     }
                 }
                 children.insert(dir.to_owned(), new_node);
                 break;
             } else {
-                parent_node = children.get_mut(dir).expect("directory must exist");
+                parent_node = children.entry(dir.to_owned()).or_insert_with(|| Node::Directory {
+                    children: BTreeMap::new(),
+                    is_local: true,
+                })
             }
         }
     }
@@ -104,9 +125,19 @@ impl Reference {
     }
 
     fn rematerialize(&self) -> MaterializedReference {
+        tracing::trace!(
+            remote_keys=?self.remote_keys, local_files=?self.local_files, local_directories=?self.local_directories,
+            "rematerialize",
+        );
         let mut materialized = build_reference(&self.remote_keys);
         for local_dir in self.local_directories.iter() {
-            materialized.add_local_node(local_dir, Node::Directory(BTreeMap::new()));
+            materialized.add_local_node(
+                local_dir,
+                Node::Directory {
+                    children: BTreeMap::new(),
+                    is_local: true,
+                },
+            );
             materialized.directories.push(local_dir.clone());
         }
         for local_file in self.local_files.iter() {
@@ -125,7 +156,7 @@ impl Reference {
         fn aux<'a>(node: &'a Node, path: Vec<&'a str>, ret: &mut Vec<(Vec<&'a str>, &'a Node)>) {
             match node {
                 Node::File(_) => ret.push((path, node)),
-                Node::Directory(children) => {
+                Node::Directory { children, .. } => {
                     for (name, child) in children.iter() {
                         let mut path = path.clone();
                         path.push(name);
@@ -199,7 +230,7 @@ impl Reference {
         let mut node = &self.materialized.root;
         for component in components {
             node = match node {
-                Node::Directory(children) => {
+                Node::Directory { children, .. } => {
                     let dir = component.as_os_str().to_str().unwrap().to_string();
                     children.get(&dir)?
                 }
@@ -299,7 +330,10 @@ fn build_reference(flat: &[(String, MockObject)]) -> MaterializedReference {
                     let path = path.as_ref().join(&key);
                     directories.push(path.clone());
                     let converted = convert(contents.take(), &path, directories);
-                    Node::Directory(converted)
+                    Node::Directory {
+                        children: converted,
+                        is_local: false,
+                    }
                 }
                 RefNode::File(contents) => Node::File(File::Remote(contents)),
             };
@@ -311,7 +345,10 @@ fn build_reference(flat: &[(String, MockObject)]) -> MaterializedReference {
     let mut directories = vec!["/".into()];
     let root = convert(tree.take(), "/", &mut directories);
     MaterializedReference {
-        root: Node::Directory(root),
+        root: Node::Directory {
+            children: root,
+            is_local: false,
+        },
         directories,
     }
 }

@@ -86,7 +86,9 @@ pub fn flatten_tree(node: TreeNode) -> Vec<(String, MockObject)> {
     fn aux(node: TreeNode, path: String, acc: &mut Vec<(String, MockObject)>) {
         match node {
             TreeNode::File(content) => {
-                acc.push((path, content.to_mock_object()));
+                if !path.is_empty() {
+                    acc.push((path, content.to_mock_object()));
+                }
             }
             TreeNode::Directory(contents) => {
                 for (name, child) in contents {
