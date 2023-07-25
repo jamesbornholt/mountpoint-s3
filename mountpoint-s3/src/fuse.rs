@@ -45,7 +45,7 @@ where
         block_on(self.fs.init(config).in_current_span())
     }
 
-    #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=parent, name=?name))]
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=parent, name=?name))]
     fn lookup(&self, _req: &Request<'_>, parent: InodeNo, name: &OsStr, reply: ReplyEntry) {
         match block_on(self.fs.lookup(parent, name).in_current_span()) {
             Ok(entry) => reply.entry(&entry.ttl, &entry.attr, entry.generation),
@@ -53,7 +53,7 @@ where
         }
     }
 
-    #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=ino))]
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=ino))]
     fn getattr(&self, _req: &Request<'_>, ino: InodeNo, reply: ReplyAttr) {
         match block_on(self.fs.getattr(ino).in_current_span()) {
             Ok(attr) => reply.attr(&attr.ttl, &attr.attr),
@@ -61,12 +61,12 @@ where
         }
     }
 
-    #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino, nlookup))]
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino, nlookup))]
     fn forget(&self, _req: &Request<'_>, ino: u64, nlookup: u64) {
         block_on(self.fs.forget(ino, nlookup));
     }
 
-    #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=ino))]
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=ino))]
     fn open(&self, _req: &Request<'_>, ino: InodeNo, flags: i32, reply: ReplyOpen) {
         match block_on(self.fs.open(ino, flags).in_current_span()) {
             Ok(opened) => reply.opened(opened.fh, opened.flags),
@@ -74,7 +74,7 @@ where
         }
     }
 
-    #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, offset=offset, size=size))]
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, offset=offset, size=size))]
     fn read(
         &self,
         _req: &Request<'_>,
@@ -124,7 +124,7 @@ where
         metrics::counter!("fuse.bytes_read", bytes_sent as u64);
     }
 
-    #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=parent))]
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=parent))]
     fn opendir(&self, _req: &Request<'_>, parent: InodeNo, flags: i32, reply: ReplyOpen) {
         match block_on(self.fs.opendir(parent, flags).in_current_span()) {
             Ok(opened) => reply.opened(opened.fh, opened.flags),
@@ -132,7 +132,7 @@ where
         }
     }
 
-    #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=parent, fh=fh, offset=offset))]
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=parent, fh=fh, offset=offset))]
     fn readdir(&self, _req: &Request<'_>, parent: InodeNo, fh: u64, offset: i64, mut reply: fuser::ReplyDirectory) {
         struct ReplyDirectory<'a> {
             inner: &'a mut fuser::ReplyDirectory,
@@ -160,7 +160,7 @@ where
         }
     }
 
-    #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=parent, fh=fh, offset=offset))]
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=parent, fh=fh, offset=offset))]
     fn readdirplus(
         &self,
         _req: &Request<'_>,
@@ -195,7 +195,7 @@ where
         }
     }
 
-    #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, datasync=datasync))]
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, datasync=datasync))]
     fn fsync(&self, _req: &Request<'_>, ino: u64, fh: u64, datasync: bool, reply: ReplyEmpty) {
         match block_on(self.fs.fsync(ino, fh, datasync).in_current_span()) {
             Ok(()) => reply.ok(),
@@ -203,7 +203,7 @@ where
         }
     }
 
-    #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=ino, fh=fh))]
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=ino, fh=fh))]
     fn release(
         &self,
         _req: &Request<'_>,
@@ -220,7 +220,7 @@ where
         }
     }
 
-    #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=ino, fh=fh))]
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=ino, fh=fh))]
     fn releasedir(&self, _req: &Request<'_>, ino: u64, fh: u64, flags: i32, reply: ReplyEmpty) {
         match block_on(self.fs.releasedir(ino, fh, flags).in_current_span()) {
             Ok(()) => reply.ok(),
@@ -228,7 +228,7 @@ where
         }
     }
 
-    #[instrument(level="debug", skip_all, fields(req=_req.unique(), parent=parent, name=?name))]
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), parent=parent, name=?name))]
     fn mknod(
         &self,
         _req: &Request<'_>,
@@ -248,7 +248,7 @@ where
         }
     }
 
-    #[instrument(level="debug", skip_all, fields(req=_req.unique(), parent=parent, name=?name))]
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), parent=parent, name=?name))]
     fn mkdir(&self, _req: &Request<'_>, parent: u64, name: &OsStr, mode: u32, umask: u32, reply: ReplyEntry) {
         // mode_t is u32 on Linux but u16 on macOS, so cast it here
         let mode = mode as libc::mode_t;
@@ -259,7 +259,7 @@ where
         }
     }
 
-    #[instrument(level="debug", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, offset=offset, length=data.len()))]
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), ino=ino, fh=fh, offset=offset, length=data.len()))]
     fn write(
         &self,
         _req: &Request<'_>,
@@ -282,7 +282,7 @@ where
         }
     }
 
-    #[instrument(level="debug", skip_all, fields(req=_req.unique(), parent=parent, name=?name))]
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), parent=parent, name=?name))]
     fn rmdir(&self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         match block_on(self.fs.rmdir(parent, name).in_current_span()) {
             Ok(()) => reply.ok(),
@@ -290,7 +290,7 @@ where
         }
     }
 
-    #[instrument(level="debug", skip_all, fields(req=_req.unique(), parent=parent, name=?name))]
+    #[instrument(level="warn", skip_all, fields(req=_req.unique(), parent=parent, name=?name))]
     fn unlink(&self, _req: &Request<'_>, parent: InodeNo, name: &OsStr, reply: ReplyEmpty) {
         match block_on(self.fs.unlink(parent, name).in_current_span()) {
             Ok(()) => reply.ok(),

@@ -141,3 +141,14 @@ impl<E: std::error::Error> ToErrno for UploadWriteError<E> {
         }
     }
 }
+
+pub trait ExpectedError: std::error::Error {
+    fn expected_error(&self) -> bool;
+}
+
+impl ExpectedError for Error {
+    fn expected_error(&self) -> bool {
+        // TODO discriminate more precisely here
+        self.to_errno() == libc::ENOENT || self.to_errno() == libc::EINVAL
+    }
+}

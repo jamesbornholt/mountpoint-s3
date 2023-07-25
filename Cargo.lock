@@ -1944,6 +1944,7 @@ dependencies = [
  "metrics",
  "mountpoint-s3-client",
  "mountpoint-s3-crt",
+ "mountpoint-s3-macros",
  "nix",
  "once_cell",
  "predicates 2.1.5",
@@ -2042,6 +2043,15 @@ dependencies = [
  "rustflags",
  "smallstr",
  "which",
+]
+
+[[package]]
+name = "mountpoint-s3-macros"
+version = "0.2.0"
+dependencies = [
+ "proc-macro2 1.0.63",
+ "quote 1.0.29",
+ "syn 2.0.22",
 ]
 
 [[package]]

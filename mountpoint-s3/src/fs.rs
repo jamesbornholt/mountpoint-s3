@@ -1,6 +1,7 @@
 //! FUSE file system types and operations, not tied to the _fuser_ library bindings.
 
 use futures::task::Spawn;
+use mountpoint_s3_macros::log_failures;
 use nix::unistd::{getgid, getuid};
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -23,7 +24,7 @@ pub use crate::inode::InodeNo;
 
 #[macro_use]
 mod error;
-pub use error::{Error, ToErrno};
+pub use error::{Error, ExpectedError, ToErrno};
 
 pub const FUSE_ROOT_INODE: InodeNo = 1u64;
 
@@ -386,6 +387,7 @@ where
         }
     }
 
+    #[log_failures(level = "warn", expected_level = "debug")]
     pub async fn lookup(&self, parent: InodeNo, name: &OsStr) -> Result<Entry, Error> {
         trace!("fs:lookup with parent {:?} name {:?}", parent, name);
 
@@ -398,6 +400,7 @@ where
         })
     }
 
+    #[log_failures(level = "warn", expected_level = "debug")]
     pub async fn getattr(&self, ino: InodeNo) -> Result<Attr, Error> {
         trace!("fs:getattr with ino {:?}", ino);
 
@@ -410,6 +413,7 @@ where
         })
     }
 
+    #[log_failures(level = "warn", expected_level = "debug")]
     pub async fn setattr(
         &self,
         ino: InodeNo,
@@ -438,6 +442,7 @@ where
         self.superblock.forget(ino, n);
     }
 
+    #[log_failures(level = "warn", expected_level = "debug")]
     pub async fn open(&self, ino: InodeNo, flags: i32) -> Result<Opened, Error> {
         trace!("fs:open with ino {:?} flags {:?}", ino, flags);
 
@@ -535,6 +540,7 @@ where
         }
     }
 
+    #[log_failures(level = "warn", expected_level = "debug")]
     pub async fn mknod(
         &self,
         parent: InodeNo,
@@ -563,6 +569,7 @@ where
         })
     }
 
+    #[log_failures(level = "warn", expected_level = "debug")]
     pub async fn mkdir(&self, parent: InodeNo, name: &OsStr, _mode: libc::mode_t, _umask: u32) -> Result<Entry, Error> {
         let lookup = self
             .superblock
@@ -577,6 +584,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)] // We don't get to choose this interface
+    #[log_failures(level = "warn", expected_level = "debug")]
     pub async fn write(
         &self,
         ino: InodeNo,
@@ -615,6 +623,7 @@ where
         Ok(len)
     }
 
+    #[log_failures(level = "warn", expected_level = "debug")]
     pub async fn opendir(&self, parent: InodeNo, _flags: i32) -> Result<Opened, Error> {
         trace!("fs:opendir with parent {:?} flags {:?}", parent, _flags);
 
@@ -633,6 +642,7 @@ where
         Ok(Opened { fh, flags: 0 })
     }
 
+    #[log_failures(level = "warn", expected_level = "debug")]
     pub async fn readdir<R: DirectoryReplier>(
         &self,
         parent: InodeNo,
@@ -644,6 +654,7 @@ where
         self.readdir_impl(parent, fh, offset, false, reply).await
     }
 
+    #[log_failures(level = "warn", expected_level = "debug")]
     pub async fn readdirplus<R: DirectoryReplier>(
         &self,
         parent: InodeNo,
@@ -655,6 +666,7 @@ where
         self.readdir_impl(parent, fh, offset, true, reply).await
     }
 
+    #[log_failures(level = "warn", expected_level = "debug")]
     async fn readdir_impl<R: DirectoryReplier>(
         &self,
         parent: InodeNo,
@@ -732,6 +744,7 @@ where
         }
     }
 
+    #[log_failures(level = "warn", expected_level = "debug")]
     pub async fn fsync(&self, _ino: InodeNo, fh: u64, _datasync: bool) -> Result<(), Error> {
         let file_handle = {
             let file_handles = self.file_handles.read().await;
@@ -752,6 +765,7 @@ where
         }
     }
 
+    #[log_failures(level = "warn", expected_level = "debug")]
     pub async fn release(
         &self,
         ino: InodeNo,
@@ -796,11 +810,13 @@ where
         }
     }
 
+    #[log_failures(level = "warn", expected_level = "debug")]
     pub async fn rmdir(&self, parent_ino: InodeNo, name: &OsStr) -> Result<(), Error> {
         self.superblock.rmdir(&self.client, parent_ino, name).await?;
         Ok(())
     }
 
+    #[log_failures(level = "warn", expected_level = "debug")]
     pub async fn releasedir(&self, _ino: InodeNo, fh: u64, _flags: i32) -> Result<(), Error> {
         let mut dir_handles = self.dir_handles.write().await;
         dir_handles
@@ -809,6 +825,7 @@ where
             .ok_or_else(|| err!(libc::EBADF, "invalid directory handle"))
     }
 
+    #[log_failures(level = "warn", expected_level = "debug")]
     pub async fn unlink(&self, parent_ino: InodeNo, name: &OsStr) -> Result<(), Error> {
         if !self.config.allow_delete {
             return Err(err!(libc::EPERM, "deletes are disabled"));
