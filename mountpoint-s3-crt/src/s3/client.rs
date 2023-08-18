@@ -479,6 +479,19 @@ pub struct MetaRequest {
     inner: NonNull<aws_s3_meta_request>,
 }
 
+impl MetaRequest {
+    /// Cancel the meta request. Does nothing (but does not fail/panic) if the request has already
+    /// completed. If the request has not already completed, parts may still be delivered to the
+    /// `body_callback` after this method completes. and the `finish_callback` will still be
+    /// invoked, but with the `crt_error` field set to `AWS_ERROR_S3_CANCELED`.
+    pub fn cancel(&self) {
+        // SAFETY: `inner` is a valid aws_s3_meta_request because it's reference-counted
+        unsafe {
+            aws_s3_meta_request_cancel(self.inner.as_ptr());
+        }
+    }
+}
+
 impl Drop for MetaRequest {
     fn drop(&mut self) {
         // SAFETY: we will no longer use the pointer after this MetaRequest is dropped, so it's safe
@@ -488,6 +501,11 @@ impl Drop for MetaRequest {
         }
     }
 }
+
+// SAFETY: `aws_s3_meta_request` is thread-safe
+unsafe impl Send for MetaRequest {}
+// SAFETY: `aws_s3_meta_request` is thread-safe
+unsafe impl Sync for MetaRequest {}
 
 /// Client metrics which represent current workload of a client.
 /// Overall, num_requests_tracked_requests shows total number of requests being processed by the client at a time.
