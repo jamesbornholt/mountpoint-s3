@@ -4,18 +4,19 @@ use std::{
     os::unix::prelude::{MetadataExt, PermissionsExt},
 };
 
-use fuser::BackgroundSession;
 use mountpoint_s3::S3FilesystemConfig;
 use nix::unistd::{getgid, getuid};
-use tempfile::TempDir;
 use test_case::test_case;
 
-use crate::fuse_tests::{read_dir_to_entry_names, TestClientBox, TestSessionConfig};
+use crate::fuse_tests::{read_dir_to_entry_names, SessionCreator, TestSessionConfig};
 
-fn perm_test<F>(creator_fn: F, uid: Option<u32>, gid: Option<u32>, dir_mode: Option<u16>, file_mode: Option<u16>)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn perm_test(
+    creator_fn: SessionCreator,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    dir_mode: Option<u16>,
+    file_mode: Option<u16>,
+) {
     let mut config = S3FilesystemConfig::default();
     if let Some(id) = uid {
         config.uid = id;
@@ -84,15 +85,13 @@ where
     assert_eq!(file_content, "hello world");
 }
 
-fn perm_test_negative<F>(
-    creator_fn: F,
+fn perm_test_negative(
+    creator_fn: SessionCreator,
     uid: Option<u32>,
     gid: Option<u32>,
     dir_mode: Option<u16>,
     file_mode: Option<u16>,
-) where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+) {
     let mut config = S3FilesystemConfig::default();
     if let Some(id) = uid {
         config.uid = id;

@@ -114,7 +114,10 @@ impl<Client: ObjectClient> UploadRequest<Client> {
         }
 
         self.hasher.update(data);
-        self.request.write(data).await?;
+        tracing::trace!(offset, len=data.len(), "starting write to put request");
+        let result = self.request.write(data).await;
+        tracing::trace!(offset, len=data.len(), "finished write to put request result={:?}", result);
+        result?;
         self.next_request_offset += data.len() as u64;
         Ok(data.len())
     }

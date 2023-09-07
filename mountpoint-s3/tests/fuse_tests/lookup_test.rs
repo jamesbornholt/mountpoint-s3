@@ -5,18 +5,13 @@ use std::{
     time::Duration,
 };
 
-use fuser::BackgroundSession;
 use mountpoint_s3::{fs::CacheConfig, S3FilesystemConfig};
-use tempfile::TempDir;
 use test_case::test_case;
 
-use crate::fuse_tests::{read_dir_to_entry_names, TestClientBox, TestSessionConfig};
+use crate::fuse_tests::{read_dir_to_entry_names, SessionCreator, TestSessionConfig};
 
 /// See [mountpoint_s3::inode::tests::test_lookup_directory_overlap].
-fn lookup_directory_overlap_test<F>(creator_fn: F, prefix: &str, subdir: &str)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn lookup_directory_overlap_test(creator_fn: SessionCreator, prefix: &str, subdir: &str) {
     let (mount_point, _session, mut test_client) = creator_fn(prefix, Default::default());
 
     test_client
@@ -51,10 +46,7 @@ fn lookup_directory_overlap_test_mock(prefix: &str, subdir: &str) {
     lookup_directory_overlap_test(crate::fuse_tests::mock_session::new, prefix, subdir);
 }
 
-fn lookup_weird_characters_test<F>(creator_fn: F, prefix: &str)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn lookup_weird_characters_test(creator_fn: SessionCreator, prefix: &str) {
     let (mount_point, _session, mut test_client) = creator_fn(prefix, Default::default());
 
     let keys = &[
@@ -105,10 +97,7 @@ fn lookup_directory_weird_characters_mock() {
     lookup_weird_characters_test(crate::fuse_tests::mock_session::new, "lookup_weird_characters_test");
 }
 
-fn lookup_previously_shadowed_file_test<F>(creator_fn: F)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn lookup_previously_shadowed_file_test(creator_fn: SessionCreator) {
     let filesystem_config = S3FilesystemConfig {
         cache_config: CacheConfig {
             file_ttl: Duration::ZERO,
@@ -150,10 +139,7 @@ fn lookup_previously_shadowed_file_test_mock() {
     lookup_previously_shadowed_file_test(crate::fuse_tests::mock_session::new);
 }
 
-fn lookup_unicode_keys_test<F>(creator_fn: F, prefix: &str)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn lookup_unicode_keys_test(creator_fn: SessionCreator, prefix: &str) {
     let (mount_point, _session, mut test_client) = creator_fn(prefix, Default::default());
 
     let keys = &["مرحبًا", "こんにちは/", "🇦🇺", "🐈/🦀"];

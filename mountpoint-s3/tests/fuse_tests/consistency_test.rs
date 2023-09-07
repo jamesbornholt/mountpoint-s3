@@ -1,16 +1,11 @@
 use std::fs::File;
 use std::os::unix::prelude::FileExt;
 
-use fuser::BackgroundSession;
-use tempfile::TempDir;
 use test_case::test_case;
 
-use crate::fuse_tests::{TestClientBox, TestSessionConfig};
+use crate::fuse_tests::SessionCreator;
 
-fn page_cache_sharing_test<F>(creator_fn: F, prefix: &str)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn page_cache_sharing_test(creator_fn: SessionCreator, prefix: &str) {
     // Big enough to avoid readahead
     const OBJECT_SIZE: usize = 512 * 1024;
 

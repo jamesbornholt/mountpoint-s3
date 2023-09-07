@@ -1,16 +1,9 @@
-use crate::fuse_tests::{read_dir_to_entry_names, TestSessionConfig};
-use fuser::BackgroundSession;
+use crate::fuse_tests::{read_dir_to_entry_names, SessionCreator};
 use std::fs::{self, DirBuilder, File};
 use std::io::Write;
-use tempfile::TempDir;
 use test_case::test_case;
 
-use crate::fuse_tests::TestClientBox;
-
-fn rmdir_local_dir_test<F>(creator_fn: F, prefix: &str)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn rmdir_local_dir_test(creator_fn: SessionCreator, prefix: &str) {
     let (mount_point, _session, _test_client) = creator_fn(prefix, Default::default());
 
     // Create local directory
@@ -81,10 +74,7 @@ fn rmdir_local_dir_test_s3(prefix: &str) {
     rmdir_local_dir_test(crate::fuse_tests::s3_session::new, prefix);
 }
 
-fn rmdir_remote_dir_test<F>(creator_fn: F, prefix: &str)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn rmdir_remote_dir_test(creator_fn: SessionCreator, prefix: &str) {
     let (mount_point, _session, mut test_client) = creator_fn(prefix, Default::default());
 
     let main_dirname = "test_dir";
@@ -142,10 +132,7 @@ fn rmdir_remote_dir_test_s3(prefix: &str) {
     rmdir_remote_dir_test(crate::fuse_tests::s3_session::new, prefix);
 }
 
-fn create_after_rmdir_test<F>(creator_fn: F, prefix: &str)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn create_after_rmdir_test(creator_fn: SessionCreator, prefix: &str) {
     let (mount_point, _session, _test_client) = creator_fn(prefix, Default::default());
     // Create local directory
     let main_dirname = "test_dir";

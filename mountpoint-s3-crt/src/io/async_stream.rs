@@ -107,7 +107,9 @@ impl AsyncStreamWriter {
     pub async fn write(&mut self, slice: &[u8]) -> Result<(), AsyncStreamWriterError> {
         let mut remaining = slice;
         while !remaining.is_empty() {
+            println!("start recv");
             let request = self.receiver.recv().await?;
+            println!("end recv {:?}", request);
             remaining = request.consume(remaining);
         }
         Ok(())

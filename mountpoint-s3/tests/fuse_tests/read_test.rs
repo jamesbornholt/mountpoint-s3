@@ -3,20 +3,15 @@ use std::io::{Read as _, Seek, SeekFrom};
 use std::os::unix::prelude::PermissionsExt;
 use std::time::{Duration, Instant};
 
-use fuser::BackgroundSession;
 use mountpoint_s3_client::PutObjectParams;
 use rand::RngCore;
 use rand::SeedableRng as _;
 use rand_chacha::ChaChaRng;
-use tempfile::TempDir;
 use test_case::test_case;
 
-use crate::fuse_tests::{read_dir_to_entry_names, TestClientBox, TestSessionConfig};
+use crate::fuse_tests::{read_dir_to_entry_names, SessionCreator};
 
-fn basic_read_test<F>(creator_fn: F, prefix: &str)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn basic_read_test(creator_fn: SessionCreator, prefix: &str) {
     let mut rng = ChaChaRng::seed_from_u64(0x87654321);
 
     let (mount_point, _session, mut test_client) = creator_fn(prefix, Default::default());
@@ -83,10 +78,7 @@ enum RestorationOptions {
     RestoreInProgress,
 }
 
-fn read_flexible_retrieval_test<F>(creator_fn: F, prefix: &str, files: &[&str], restore: RestorationOptions)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn read_flexible_retrieval_test(creator_fn: SessionCreator, prefix: &str, files: &[&str], restore: RestorationOptions) {
     let (mount_point, _session, mut test_client) = creator_fn(prefix, Default::default());
 
     for file in files {

@@ -1,17 +1,12 @@
-use fuser::BackgroundSession;
 use mountpoint_s3::prefetch::PrefetcherConfig;
 use mountpoint_s3::S3FilesystemConfig;
 use std::fs::{File, OpenOptions};
 use std::io::Read;
-use tempfile::TempDir;
 use test_case::test_case;
 
-use crate::fuse_tests::{TestClientBox, TestSessionConfig};
+use crate::fuse_tests::{SessionCreator, TestSessionConfig};
 
-fn read_test<F>(creator_fn: F, object_size: usize)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn read_test(creator_fn: SessionCreator, object_size: usize) {
     let (mount_point, _session, mut test_client) = creator_fn(Default::default(), Default::default());
 
     let file_name = "hello.bin";
@@ -49,10 +44,7 @@ fn read_test_mock(object_size: usize) {
 /// So, when we read the first block, it prefetches the requests ti require to fulfill and the next request
 /// depending on size of last request.
 /// If object is mutated, E-Tag for the new prefetch request will change and hence the request will fail giving IO error.
-fn prefetch_test_etag<F>(creator_fn: F, prefix: &str, request_size: usize, read_size: usize)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn prefetch_test_etag(creator_fn: SessionCreator, prefix: &str, request_size: usize, read_size: usize) {
     const OBJECT_SIZE: usize = 1024 * 1024;
 
     let prefetcher_config = PrefetcherConfig {

@@ -1,10 +1,8 @@
 use std::path::Path;
 
-use fuser::BackgroundSession;
-use tempfile::TempDir;
 use walkdir::WalkDir;
 
-use crate::fuse_tests::{TestClientBox, TestSessionConfig};
+use crate::fuse_tests::SessionCreator;
 
 /// Recursively list the contents of a directory and return the paths of all entries, with the
 /// initial `path` stripped. If `files` is true, the list contains only files; if false, it contains
@@ -50,10 +48,7 @@ fn list_dir_recursive(path: impl AsRef<Path>, files: bool) -> Result<Vec<String>
 ///     * `red` (directory)
 ///         * `image.jpg` (file)
 ///     * `list.txt` (file)
-fn basic_directory_structure<F>(creator_fn: F)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn basic_directory_structure(creator_fn: SessionCreator) {
     let (mount_point, _session, mut test_client) = creator_fn("basic_directory_structure", Default::default());
 
     test_client.put_object("colors/blue/image.jpg", b"hello world").unwrap();
@@ -92,10 +87,7 @@ fn basic_directory_structure_s3() {
 /// `image.jpg` file, and an empty `red` directory. The `blue/` and `red/` objects will not be
 /// accessible. Note that the S3 Console creates zero-byte objects like `blue/` and `red/` when
 /// creating directories in a bucket, and so these directories will work as expected.
-fn keys_ending_in_delimiter<F>(creator_fn: F)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn keys_ending_in_delimiter(creator_fn: SessionCreator) {
     let (mount_point, _session, mut test_client) = creator_fn("keys_ending_in_delimiter", Default::default());
 
     test_client.put_object("blue/", b"hello world").unwrap();
@@ -129,10 +121,7 @@ fn keys_ending_in_delimiter_s3() {
 /// then mounting your bucket would give a file system with a `blue` directory, containing the file
 /// `image.jpg`. The `blue` object will not be accessible. Deleting the key `blue/image.jpg` will
 /// remove the `blue` directory, and cause the `blue` file to become visible.
-fn files_shadowed_by_directories<F>(creator_fn: F)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn files_shadowed_by_directories(creator_fn: SessionCreator) {
     let (mount_point, _session, mut test_client) = creator_fn("files_shadowed_by_directories", Default::default());
 
     test_client.put_object("blue", b"hello world").unwrap();

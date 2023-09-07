@@ -1,18 +1,13 @@
 use std::fs::{self, File};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 
-use fuser::BackgroundSession;
 use mountpoint_s3::S3FilesystemConfig;
-use tempfile::TempDir;
 use test_case::test_case;
 
-use crate::fuse_tests::{read_dir_to_entry_names, TestClientBox, TestSessionConfig};
+use crate::fuse_tests::{read_dir_to_entry_names, SessionCreator, TestSessionConfig};
 
 /// Simple test cases, assuming a file isn't open for reading elsewhere.
-fn simple_unlink_tests<F>(creator_fn: F, prefix: &str)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn simple_unlink_tests(creator_fn: SessionCreator, prefix: &str) {
     let test_session_config = TestSessionConfig {
         filesystem_config: S3FilesystemConfig {
             allow_delete: true,
@@ -62,10 +57,7 @@ fn simple_unlink_test_mock(prefix: &str) {
 }
 
 /// Testing behavior when a file is unlinked in the middle of reading
-fn unlink_readhandle_test<F>(creator_fn: F, prefix: &str)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn unlink_readhandle_test(creator_fn: SessionCreator, prefix: &str) {
     let test_session_config = TestSessionConfig {
         filesystem_config: S3FilesystemConfig {
             allow_delete: true,
@@ -118,10 +110,7 @@ fn unlink_readhandle_test_mock(prefix: &str) {
 }
 
 /// Testing behavior when a file is unlinked during and after writing
-fn unlink_writehandle_test<F>(creator_fn: F, prefix: &str)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn unlink_writehandle_test(creator_fn: SessionCreator, prefix: &str) {
     let test_session_config = TestSessionConfig {
         filesystem_config: S3FilesystemConfig {
             allow_delete: true,
@@ -185,10 +174,7 @@ fn unlink_writehandle_test_mock(prefix: &str) {
     unlink_writehandle_test(crate::fuse_tests::mock_session::new, prefix);
 }
 
-fn unlink_fail_on_delete_not_allowed_test<F>(creator_fn: F)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn unlink_fail_on_delete_not_allowed_test(creator_fn: SessionCreator) {
     let test_session_config = TestSessionConfig {
         filesystem_config: S3FilesystemConfig {
             allow_delete: false,

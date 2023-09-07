@@ -65,6 +65,27 @@ impl Default for TestSessionConfig {
     }
 }
 
+/// A wrapper around a [`fuser::BackgroundSession`] that automatically unmounts on drop
+pub struct TestSession {
+    inner: Option<BackgroundSession>,
+}
+
+impl TestSession {
+    fn new(session: BackgroundSession) -> Self {
+        Self { inner: Some(session) }
+    }
+}
+
+impl Drop for TestSession {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.take() {
+            inner.join();
+        }
+    }
+}
+
+pub type SessionCreator = fn(&str, TestSessionConfig) -> (TempDir, TestSession, TestClientBox);
+
 mod mock_session {
     use super::*;
 
@@ -74,7 +95,7 @@ mod mock_session {
     use mountpoint_s3_client::mock_client::{MockClient, MockClientConfig, MockObject};
 
     /// Create a FUSE mount backed by a mock object client that does not talk to S3
-    pub fn new(test_name: &str, test_config: TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox) {
+    pub fn new(test_name: &str, test_config: TestSessionConfig) -> (TempDir, TestSession, TestClientBox) {
         let mount_dir = tempfile::tempdir().unwrap();
 
         let bucket = "test_bucket";
@@ -94,8 +115,6 @@ mod mock_session {
             MountOption::DefaultPermissions,
             MountOption::FSName("mountpoint-s3".to_string()),
             MountOption::NoAtime,
-            MountOption::AutoUnmount,
-            MountOption::AllowOther,
         ];
 
         let runtime = ThreadPool::builder().pool_size(1).create().unwrap();
@@ -115,6 +134,7 @@ mod mock_session {
         .unwrap();
 
         let session = BackgroundSession::new(session).unwrap();
+        let session = TestSession::new(session);
 
         let test_client = MockTestClient {
             prefix: prefix.to_string(),
@@ -203,7 +223,7 @@ mod s3_session {
     use mountpoint_s3_client::{EndpointConfig, S3ClientConfig, S3CrtClient};
 
     /// Create a FUSE mount backed by a real S3 client
-    pub fn new(test_name: &str, test_config: TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox) {
+    pub fn new(test_name: &str, test_config: TestSessionConfig) -> (TempDir, TestSession, TestClientBox) {
         let mount_dir = tempfile::tempdir().unwrap();
 
         let (bucket, prefix) = get_test_bucket_and_prefix(test_name);
@@ -219,8 +239,6 @@ mod s3_session {
             MountOption::DefaultPermissions,
             MountOption::FSName("mountpoint-s3".to_string()),
             MountOption::NoAtime,
-            MountOption::AutoUnmount,
-            MountOption::AllowOther,
         ];
 
         let prefix = Prefix::new(&prefix).expect("valid prefix");
@@ -232,6 +250,7 @@ mod s3_session {
         .unwrap();
 
         let session = BackgroundSession::new(session).unwrap();
+        let session = TestSession::new(session);
 
         let sdk_client = tokio_block_on(async { get_test_sdk_client(&region).await });
         let test_client = SDKTestClient {

@@ -3,15 +3,13 @@ use std::io::{ErrorKind, Read, Seek, Write};
 use std::os::unix::prelude::OpenOptionsExt;
 use std::path::Path;
 
-use fuser::BackgroundSession;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
-use tempfile::TempDir;
 use test_case::test_case;
 
 use mountpoint_s3::S3FilesystemConfig;
 
-use crate::fuse_tests::{read_dir_to_entry_names, TestClientBox, TestSessionConfig};
+use crate::fuse_tests::{read_dir_to_entry_names, SessionCreator, TestSessionConfig};
 
 fn open_for_write(path: impl AsRef<Path>, append: bool) -> std::io::Result<File> {
     let mut options = File::options();
@@ -23,10 +21,7 @@ fn open_for_write(path: impl AsRef<Path>, append: bool) -> std::io::Result<File>
     options.create(true).open(path)
 }
 
-fn sequential_write_test<F>(creator_fn: F, prefix: &str, append: bool)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn sequential_write_test(creator_fn: SessionCreator, prefix: &str, append: bool) {
     const OBJECT_SIZE: usize = 50 * 1024;
     const WRITE_SIZE: usize = 1024;
 
@@ -145,10 +140,7 @@ fn sequential_write_test_mock(prefix: &str, append: bool) {
     sequential_write_test(crate::fuse_tests::mock_session::new, prefix, append);
 }
 
-fn write_errors_test<F>(creator_fn: F, prefix: &str)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn write_errors_test(creator_fn: SessionCreator, prefix: &str) {
     let (mount_point, _session, mut test_client) = creator_fn(prefix, Default::default());
 
     test_client.put_object("dir/hello.txt", b"hello world").unwrap();
@@ -199,10 +191,7 @@ fn write_errors_test_mock(prefix: &str) {
     write_errors_test(crate::fuse_tests::mock_session::new, prefix);
 }
 
-fn sequential_write_streaming_test<F>(creator_fn: F, object_size: usize, write_chunk_size: usize)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn sequential_write_streaming_test(creator_fn: SessionCreator, object_size: usize, write_chunk_size: usize) {
     const KEY: &str = "dir/new.txt";
 
     let (mount_point, _session, mut test_client) = creator_fn("sequential_write_streaming_test", Default::default());
@@ -266,10 +255,7 @@ fn sequential_write_streaming_test_mock(object_size: usize, write_chunk_size: us
     sequential_write_streaming_test(crate::fuse_tests::mock_session::new, object_size, write_chunk_size);
 }
 
-fn fsync_test<F>(creator_fn: F)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn fsync_test(creator_fn: SessionCreator) {
     const OBJECT_SIZE: usize = 32;
     const KEY: &str = "new.txt";
 
@@ -320,10 +306,7 @@ fn fsync_test_mock() {
     fsync_test(crate::fuse_tests::mock_session::new);
 }
 
-fn write_too_big_test<F>(creator_fn: F, write_size: usize)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn write_too_big_test(creator_fn: SessionCreator, write_size: usize) {
     const KEY: &str = "new.txt";
     const PART_SIZE: usize = 64;
     const MAX_S3_MULTIPART_UPLOAD_PARTS: usize = 10000;
@@ -370,10 +353,7 @@ fn write_too_big_test_mock(write_size: usize) {
     write_too_big_test(crate::fuse_tests::mock_session::new, write_size);
 }
 
-fn out_of_order_write_test<F>(creator_fn: F, offset: i64)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn out_of_order_write_test(creator_fn: SessionCreator, offset: i64) {
     const OBJECT_SIZE: usize = 32;
     const KEY: &str = "new.txt";
 
@@ -422,10 +402,7 @@ fn out_of_order_write_test_mock(offset: i64) {
     out_of_order_write_test(crate::fuse_tests::mock_session::new, offset);
 }
 
-fn write_with_storage_class_test<F>(creator_fn: F, storage_class: Option<&str>)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn write_with_storage_class_test(creator_fn: SessionCreator, storage_class: Option<&str>) {
     const KEY: &str = "new.txt";
 
     let config = TestSessionConfig {
@@ -462,10 +439,7 @@ fn write_with_storage_class_test_s3_mock(storage_class: Option<&str>) {
 }
 
 #[cfg_attr(not(feature = "s3_tests"), allow(unused))] // Mock client doesn't validate storage classes
-fn write_with_invalid_storage_class_test<F>(creator_fn: F, storage_class: &str)
-where
-    F: FnOnce(&str, TestSessionConfig) -> (TempDir, BackgroundSession, TestClientBox),
-{
+fn write_with_invalid_storage_class_test(creator_fn: SessionCreator, storage_class: &str) {
     const KEY: &str = "new.txt";
 
     let config = TestSessionConfig {
