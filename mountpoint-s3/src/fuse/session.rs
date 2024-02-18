@@ -2,12 +2,101 @@ use std::io;
 
 use anyhow::Context;
 use fuser::{Filesystem, Session, SessionUnmounter};
+use procfs::sys::fs;
 use tracing::{debug, error, trace, warn};
 
 use crate::sync::atomic::{AtomicUsize, Ordering};
 use crate::sync::mpsc::{self, Sender};
 use crate::sync::thread::{self, JoinHandle};
 use crate::sync::Arc;
+
+pub struct FuseSession2 {
+    unmounter: SessionUnmounter,
+    receiver: mpsc::Receiver<Message>,
+    on_close: Vec<OnClose>,
+}
+
+impl FuseSession2 {
+    pub fn new<FS: Filesystem + Send + Sync + 'static>(
+        mut session: Session<Arc<FS>>,
+        fs: Arc<FS>,
+    ) -> anyhow::Result<Self> {
+        let unmounter = session.unmount_callable();
+
+        let (tx, rx) = mpsc::sync_channel(0);
+        let (stoptx, stoprx) = mpsc::channel();
+
+        let session_state = session.state.clone();
+
+        let dispatcher = {
+            thread::Builder::new()
+                .name("fuse-dispatcher".to_owned())
+                .spawn(move || {
+                    loop {
+                        let buf = unsafe {
+                            let buf = std::alloc::alloc(
+                                std::alloc::Layout::from_size_align(
+                                    16 * 1024 * 1024 + 4096,
+                                    std::mem::align_of::<u8>(),
+                                )
+                                .unwrap(),
+                            );
+                            Vec::from_raw_parts(buf, 16 * 1024 * 1024 + 4096, 16 * 1024 * 1024 + 4096)
+                        };
+                        match session.next_request(buf) {
+                            Ok(Some(req)) => {
+                                trace!(?req, "received request");
+                                let _ = tx.send(req);
+                            }
+                            Ok(None) => break,
+                            Err(e) => {
+                                error!(?e, "failed to receive request");
+                                break;
+                            }
+                        }
+                    }
+                    let _ = stoptx.send(Message::WorkersExited);
+                })
+                .context("failed to spawn dispatcher")?
+        };
+
+        let server = {
+            thread::Builder::new()
+                .name("fuser-server".to_owned())
+                .spawn(move || {
+                    while let Ok(req) = rx.recv() {
+                        let Some(parsed_req) = req.parse() else {
+                            break;
+                        };
+                        trace!(?parsed_req, "dispatching request");
+                        parsed_req.dispatch(&session_state, &*fs);
+                    }
+                })
+                .context("failed to spawn server")?
+        };
+
+        Ok(Self {
+            unmounter,
+            receiver: stoprx,
+            on_close: Default::default(),
+        })
+    }
+
+    /// Block until the file system is unmounted or this process is interrupted via SIGTERM/SIGINT.
+    /// When that happens, unmount the file system (if it hasn't been already unmounted).
+    pub fn join(mut self) -> anyhow::Result<()> {
+        let msg = self.receiver.recv();
+        trace!("received message {msg:?}, closing filesystem session");
+
+        trace!("executing {} handler(s) on close", self.on_close.len());
+        for handler in self.on_close {
+            handler();
+        }
+
+        trace!("unmounting filesystem");
+        self.unmounter.unmount().context("failed to unmount FUSE session")
+    }
+}
 
 /// A multi-threaded FUSE session that can be joined to wait for the FUSE filesystem to unmount or
 /// this process to be interrupted.

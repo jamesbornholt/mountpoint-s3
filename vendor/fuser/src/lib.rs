@@ -291,6 +291,7 @@ impl KernelConfig {
 /// implementations are provided here to get a mountable filesystem that does
 /// nothing.
 #[allow(clippy::too_many_arguments)]
+#[auto_impl::auto_impl(Arc)]
 pub trait Filesystem {
     /// Initialize filesystem.
     /// Called before any other filesystem method.

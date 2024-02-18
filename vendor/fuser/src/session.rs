@@ -49,6 +49,12 @@ pub struct Session<FS: Filesystem> {
     mount: Arc<Mutex<Option<Mount>>>,
     /// Mount point
     mountpoint: PathBuf,
+    /// Session state
+    pub state: Arc<SessionState>,
+}
+
+#[derive(Debug)]
+pub struct SessionState {
     /// Whether to restrict access to owner, root + owner, or unrestricted
     /// Used to implement allow_root and auto_unmount
     pub(crate) allowed: SessionACL,
@@ -62,6 +68,19 @@ pub struct Session<FS: Filesystem> {
     pub(crate) initialized: AtomicBool,
     /// True if the filesystem was destroyed (destroy operation done)
     pub(crate) destroyed: AtomicBool,
+}
+
+impl SessionState {
+    fn new(allowed: SessionACL, session_owner: u32) -> Self {
+        Self {
+            allowed,
+            session_owner,
+            proto_major: AtomicU32::new(0),
+            proto_minor: AtomicU32::new(0),
+            initialized: AtomicBool::new(false),
+            destroyed: AtomicBool::new(false),
+        }
+    }
 }
 
 impl<FS: Filesystem> Session<FS> {
@@ -96,17 +115,14 @@ impl<FS: Filesystem> Session<FS> {
             SessionACL::Owner
         };
 
+        let session_state = SessionState::new(allowed, unsafe { libc::geteuid() });
+
         Ok(Session {
             filesystem,
             ch,
             mount: Arc::new(Mutex::new(Some(mount))),
             mountpoint: mountpoint.to_owned(),
-            allowed,
-            session_owner: unsafe { libc::geteuid() },
-            proto_major: AtomicU32::new(0),
-            proto_minor: AtomicU32::new(0),
-            initialized: AtomicBool::new(false),
-            destroyed: AtomicBool::new(false),
+            state: Arc::new(session_state),
         })
     }
 
@@ -114,6 +130,37 @@ impl<FS: Filesystem> Session<FS> {
     pub fn mountpoint(&self) -> &Path {
         &self.mountpoint
     }
+
+    /// Read the next FUSE request
+    pub fn next_request<'a>(&self, mut buf: Vec<u8>) -> io::Result<Option<UnparsedRequest>> {
+        assert!(buf.len() >= BUFFER_SIZE);
+        let aligned_buf = aligned_sub_buf(
+            buf.deref_mut(),
+            std::mem::align_of::<abi::fuse_in_header>(),
+        );
+        loop {
+            match self.ch.receive(aligned_buf) {
+                Ok(size) => return Ok(Some(UnparsedRequest {
+                    buf,
+                    size,
+                    sender: self.ch.sender(),
+                })),
+                Err(err) => match err.raw_os_error() {
+                    // Operation interrupted. Accordingly to FUSE, this is safe to retry
+                    Some(ENOENT) => continue,
+                    // Interrupted system call, retry
+                    Some(EINTR) => continue,
+                    // Explicitly try again
+                    Some(EAGAIN) => continue,
+                    // Filesystem was unmounted, quit the loop
+                    Some(ENODEV) => return Ok(None),
+                    // Unhandled error
+                    _ => return Err(err),
+                },
+            }
+        }
+    }
+
 
     /// Run the session loop that receives kernel requests and dispatches them to method
     /// calls into the filesystem.
@@ -133,39 +180,21 @@ impl<FS: Filesystem> Session<FS> {
         // Buffer for receiving requests from the kernel. Only one is allocated and
         // it is reused immediately after dispatching to conserve memory and allocations.
         let mut buffer = vec![0; BUFFER_SIZE];
-        let buf = aligned_sub_buf(
-            buffer.deref_mut(),
-            std::mem::align_of::<abi::fuse_in_header>(),
-        );
+
         loop {
-            // Read the next request from the given channel to kernel driver
-            // The kernel driver makes sure that we get exactly one request per read
-            match self.ch.receive(buf) {
-                Ok(size) => match Request::new(self.ch.sender(), &buf[..size]) {
-                    // Dispatch request
-                    Some(req) => {
-                        before_dispatch(&req);
-                        req.dispatch(self);
-                        after_dispatch(&req);
-                    },
-                    // Quit loop on illegal request
-                    None => break,
+            match self.next_request(buffer)? {
+                Some(unparsed_req) => {
+                    let Some(req) = unparsed_req.parse() else {
+                        return Ok(());
+                    };
+                    before_dispatch(&req);
+                    req.dispatch(&self.state, &self.filesystem);
+                    after_dispatch(&req);
+                    buffer = unparsed_req.into_inner();
                 },
-                Err(err) => match err.raw_os_error() {
-                    // Operation interrupted. Accordingly to FUSE, this is safe to retry
-                    Some(ENOENT) => continue,
-                    // Interrupted system call, retry
-                    Some(EINTR) => continue,
-                    // Explicitly try again
-                    Some(EAGAIN) => continue,
-                    // Filesystem was unmounted, quit the loop
-                    Some(ENODEV) => break,
-                    // Unhandled error
-                    _ => return Err(err),
-                },
+                None => return Ok(()),
             }
         }
-        Ok(())
     }
 
     /// Unmount the filesystem
@@ -184,6 +213,23 @@ impl<FS: Filesystem> Session<FS> {
     #[cfg(feature = "abi-7-11")]
     pub fn notifier(&self) -> Notifier {
         Notifier::new(self.ch.sender())
+    }
+}
+
+#[derive(Debug)]
+pub struct UnparsedRequest {
+    buf: Vec<u8>,
+    size: usize,
+    sender: ChannelSender,
+}
+
+impl UnparsedRequest {
+    pub fn parse(&self) -> Option<Request<'_>> {
+        Request::new(self.sender.clone(), &self.buf[..self.size])
+    }
+
+    pub fn into_inner(self) -> Vec<u8> {
+        self.buf
     }
 }
 
@@ -219,7 +265,7 @@ impl<FS: 'static + Filesystem + Send> Session<FS> {
 
 impl<FS: Filesystem> Drop for Session<FS> {
     fn drop(&mut self) {
-        if !self.destroyed.swap(true, Ordering::SeqCst) {
+        if !self.state.destroyed.swap(true, Ordering::SeqCst) {
             self.filesystem.destroy();
         }
         info!("Unmounted {}", self.mountpoint().display());
