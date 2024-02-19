@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context as _};
 use clap::{value_parser, Parser, ValueEnum};
-use fuser::{MountOption, Session};
+use fuser::{MountOption, Session, SharedSession};
 use futures::task::Spawn;
 use mountpoint_s3_client::config::{AddressingStyle, EndpointConfig, S3ClientAuthConfig, S3ClientConfig};
 use mountpoint_s3_client::error::ObjectClientError;
@@ -704,9 +704,9 @@ where
     Prefetcher: Prefetch + Send + Sync + 'static,
 {
     let fs = S3FuseFilesystem::new(client, prefetcher, bucket_name, prefix, filesystem_config);
-    let session = Session::new(fs, &fuse_session_config.mount_point, &fuse_session_config.options)
+    let session = SharedSession::mount(&fuse_session_config.mount_point, &fuse_session_config.options)
         .context("Failed to create FUSE session")?;
-    let session = FuseSession::new(session, fuse_session_config.max_threads).context("Failed to start FUSE session")?;
+    let session = FuseSession::new(session, fs, fuse_session_config.max_threads).context("Failed to start FUSE session")?;
 
     tracing::info!(
         "successfully mounted {} at {}",

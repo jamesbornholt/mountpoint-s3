@@ -14,8 +14,7 @@ use crate::prefix::Prefix;
 #[cfg(target_os = "macos")]
 use fuser::ReplyXTimes;
 use fuser::{
-    Filesystem, KernelConfig, ReplyAttr, ReplyBmap, ReplyCreate, ReplyData, ReplyEmpty, ReplyEntry, ReplyIoctl,
-    ReplyLock, ReplyLseek, ReplyOpen, ReplyWrite, ReplyXattr, Request, TimeOrNow,
+    Filesystem, KernelConfig, ReplyAttr, ReplyBmap, ReplyCreate, ReplyData, ReplyEmpty, ReplyEntry, ReplyIoctl, ReplyLock, ReplyLseek, ReplyOpen, ReplyWrite, ReplyXattr, Request, SharedFilesystem, TimeOrNow
 };
 
 pub mod session;
@@ -89,7 +88,7 @@ where
     }
 }
 
-impl<Client, Prefetcher> Filesystem for S3FuseFilesystem<Client, Prefetcher>
+impl<Client, Prefetcher> SharedFilesystem for S3FuseFilesystem<Client, Prefetcher>
 where
     Client: ObjectClient + Send + Sync + 'static,
     Prefetcher: Prefetch,

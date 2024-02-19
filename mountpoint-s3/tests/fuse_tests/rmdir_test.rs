@@ -1,5 +1,5 @@
 use crate::common::fuse::{self, read_dir_to_entry_names, TestClientBox, TestSessionConfig};
-use fuser::BackgroundSession;
+use crate::common::fuse::BackgroundSession;
 use std::fs::{self, DirBuilder, File};
 use std::io::Write;
 use tempfile::TempDir;

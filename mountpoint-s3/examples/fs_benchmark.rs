@@ -164,6 +164,8 @@ fn mount_file_system(bucket_name: &str, region: &str, throughput_target_gbps: Op
         bucket_name,
         mountpoint.to_str().unwrap()
     );
+    panic!();
+    /*
     let prefetcher = default_prefetch(runtime, Default::default());
     let session = Session::new(
         S3FuseFilesystem::new(client, prefetcher, bucket_name, &Default::default(), filesystem_config),
@@ -172,5 +174,5 @@ fn mount_file_system(bucket_name: &str, region: &str, throughput_target_gbps: Op
     )
     .expect("Should have created FUSE session successfully");
 
-    BackgroundSession::new(session).expect("Should have started FUSE session successfully")
+    BackgroundSession::new(session).expect("Should have started FUSE session successfully")*/
 }

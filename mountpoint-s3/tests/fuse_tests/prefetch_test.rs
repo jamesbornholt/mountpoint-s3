@@ -1,4 +1,4 @@
-use fuser::BackgroundSession;
+use crate::common::fuse::BackgroundSession;
 use mountpoint_s3::data_cache::InMemoryDataCache;
 use mountpoint_s3::prefetch::PrefetcherConfig;
 use std::fs::{File, OpenOptions};

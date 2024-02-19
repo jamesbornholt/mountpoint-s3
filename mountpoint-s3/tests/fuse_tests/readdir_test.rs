@@ -1,5 +1,5 @@
 use crate::common::fuse::{self, read_dir_to_entry_names, TestClientBox, TestSessionConfig};
-use fuser::BackgroundSession;
+use crate::common::fuse::BackgroundSession;
 use mountpoint_s3::S3FilesystemConfig;
 use rand::distributions::{Alphanumeric, DistString};
 use rand::rngs::StdRng;

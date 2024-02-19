@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Command;
 use std::thread;
 
-use fuser::BackgroundSession;
+use crate::common::fuse::BackgroundSession;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use tempfile::TempDir;

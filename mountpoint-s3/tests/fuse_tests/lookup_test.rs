@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use fuser::BackgroundSession;
+use crate::common::fuse::BackgroundSession;
 use mountpoint_s3::{fs::CacheConfig, S3FilesystemConfig};
 use tempfile::TempDir;
 use test_case::test_case;

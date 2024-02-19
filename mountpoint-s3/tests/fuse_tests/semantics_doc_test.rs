@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use fuser::BackgroundSession;
+use crate::common::fuse::BackgroundSession;
 use tempfile::TempDir;
 use walkdir::WalkDir;
 

@@ -1,7 +1,7 @@
 use std::fs::{self, File};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 
-use fuser::BackgroundSession;
+use crate::common::fuse::BackgroundSession;
 use mountpoint_s3::S3FilesystemConfig;
 use tempfile::TempDir;
 use test_case::test_case;

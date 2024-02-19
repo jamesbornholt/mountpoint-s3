@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::os::unix::prelude::FileExt;
 
-use fuser::BackgroundSession;
+use crate::common::fuse::BackgroundSession;
 use tempfile::TempDir;
 use test_case::test_case;
 

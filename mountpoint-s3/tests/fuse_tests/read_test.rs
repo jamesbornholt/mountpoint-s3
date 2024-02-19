@@ -6,7 +6,7 @@ use std::path::Path;
 #[cfg(not(feature = "s3express_tests"))]
 use std::time::{Duration, Instant};
 
-use fuser::BackgroundSession;
+use crate::common::fuse::BackgroundSession;
 use mountpoint_s3::data_cache::InMemoryDataCache;
 use mountpoint_s3::S3FilesystemConfig;
 #[cfg(not(feature = "s3express_tests"))]

@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use filetime::FileTime;
-use fuser::BackgroundSession;
+use crate::common::fuse::BackgroundSession;
 use tempfile::TempDir;
 use test_case::test_case;
 

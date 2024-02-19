@@ -4,7 +4,7 @@ use std::{
     os::unix::prelude::{MetadataExt, PermissionsExt},
 };
 
-use fuser::BackgroundSession;
+use crate::common::fuse::BackgroundSession;
 use mountpoint_s3::S3FilesystemConfig;
 use nix::unistd::{getgid, getuid};
 use tempfile::TempDir;

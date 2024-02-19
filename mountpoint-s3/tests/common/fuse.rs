@@ -3,7 +3,8 @@ use std::fs::ReadDir;
 use std::path::Path;
 use std::sync::Arc;
 
-use fuser::{BackgroundSession, MountOption, Session};
+// use fuser::{BackgroundSession, MountOption, Session};
+use fuser::MountOption;
 use mountpoint_s3::data_cache::DataCache;
 use mountpoint_s3::fuse::S3FuseFilesystem;
 use mountpoint_s3::prefetch::{Prefetch, PrefetcherConfig};
@@ -97,14 +98,37 @@ where
     ];
 
     let prefix = Prefix::new(prefix).expect("valid prefix");
-    let session = Session::new(
-        S3FuseFilesystem::new(client, prefetcher, bucket, &prefix, filesystem_config),
-        mount_dir,
-        &options,
-    )
-    .unwrap();
+    let fs = S3FuseFilesystem::new(client, prefetcher, bucket, &prefix, filesystem_config);
+    let session = fuser::SharedSession::mount(mount_dir, &options).unwrap();
 
-    BackgroundSession::new(session).unwrap()
+    BackgroundSession::new(fs, session).unwrap()
+}
+
+#[derive(Debug)]
+pub struct BackgroundSession {
+    guard: std::thread::JoinHandle<std::io::Result<()>>,
+    session: std::sync::Arc<fuser::SharedSession>,
+}
+
+impl BackgroundSession {
+    pub fn new<FS: fuser::SharedFilesystem + Send + 'static>(fs: FS, se: fuser::SharedSession) -> std::io::Result<Self> {
+        let se = std::sync::Arc::new(se);
+        let se_clone = se.clone();
+        let guard = std::thread::spawn(move || {
+            let mut buf = vec![0u8; fuser::REQUEST_BUFFER_SIZE];
+            loop {
+                let Some(req) = se.next_request(&mut buf)? else {
+                    break;
+                };
+                se.dispatch(req, &fs);
+            }
+            Ok(())
+        });
+        Ok(Self {
+            guard,
+            session: se_clone,
+        })
+    }
 }
 
 pub mod mock_session {

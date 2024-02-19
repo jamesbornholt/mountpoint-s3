@@ -12,7 +12,7 @@ use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::{fs::OpenOptions, time::Duration};
 
 use crate::common::fuse::{self, TestClientBox, TestSessionConfig};
-use fuser::BackgroundSession;
+use crate::common::fuse::BackgroundSession;
 use mountpoint_s3::data_cache::InMemoryDataCache;
 use mountpoint_s3::fs::{CacheConfig, S3FilesystemConfig};
 use serial_test::serial;

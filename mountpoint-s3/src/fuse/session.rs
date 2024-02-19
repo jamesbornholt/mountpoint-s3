@@ -1,7 +1,7 @@
 use std::io;
 
 use anyhow::Context;
-use fuser::{Filesystem, Session, SessionUnmounter};
+use fuser::{Filesystem, Session, SessionUnmounter, SharedFilesystem, SharedSession};
 use tracing::{debug, error, trace, warn};
 
 use crate::sync::atomic::{AtomicUsize, Ordering};
@@ -23,11 +23,15 @@ type OnClose = Box<dyn FnOnce()>;
 
 impl FuseSession {
     /// Create worker threads to dispatch requests for a FUSE session.
-    pub fn new<FS: Filesystem + Send + Sync + 'static>(
-        mut session: Session<FS>,
+    pub fn new<FS: SharedFilesystem + Send + Sync + 'static>(
+        session: SharedSession,
+        filesystem: FS,
         max_worker_threads: usize,
     ) -> anyhow::Result<Self> {
         assert!(max_worker_threads > 0);
+
+        let session = Arc::new(session);
+        let filesystem = Arc::new(filesystem);
 
         let unmounter = session.unmount_callable();
 
@@ -72,7 +76,8 @@ impl FuseSession {
         })
         .context("failed to set interrupt handler")?;
 
-        WorkerPool::start(session, workers_tx, max_worker_threads).context("failed to start worker thread pool")?;
+        let work = (session, filesystem);
+        WorkerPool::start(work, workers_tx, max_worker_threads).context("failed to start worker thread pool")?;
 
         Ok(Self {
             unmounter,
@@ -209,9 +214,9 @@ impl<W: Work> Clone for WorkerPool<W> {
     }
 }
 
-impl<FS> Work for Session<FS>
+impl<FS> Work for (Arc<SharedSession>, Arc<FS>)
 where
-    FS: Filesystem + Send + Sync + 'static,
+    FS: SharedFilesystem + Send + Sync + 'static,
 {
     type Result = io::Result<()>;
 
@@ -220,22 +225,19 @@ where
         FB: FnMut(),
         FA: FnMut(),
     {
-        self.run_with_callbacks(
-            |req| {
-                // Do not scale threads on bursts of forget messages.
-                if req.is_forget() {
-                    return;
-                }
+        let mut buf = vec![0u8; fuser::REQUEST_BUFFER_SIZE];
+        loop {
+            let Some(req) = self.0.next_request(&mut buf)? else {
+                return Ok(());
+            };
+            //if !req.is_forget() {
                 before();
-            },
-            |req| {
-                // Do not scale threads on bursts of forget messages.
-                if req.is_forget() {
-                    return;
-                }
+            //}
+            self.0.dispatch(req, &*self.1);
+            //if !req.is_forget() {
                 after();
-            },
-        )
+            //}
+        }
     }
 }
 
