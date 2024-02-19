@@ -364,6 +364,14 @@ impl MetaRequestOptions {
         options.inner.part_size = part_size;
         self
     }
+
+    /// Set the maximum connections per VIP of this request
+    pub fn max_connections_per_vip(&mut self, max_connections_per_vip: u32) -> &mut Self {
+        // SAFETY: we aren't moving out of the struct.
+        let options = unsafe { Pin::get_unchecked_mut(Pin::as_mut(&mut self.0)) };
+        options.inner.max_num_connections_per_vip = max_connections_per_vip;
+        self
+    }
 }
 
 impl Default for MetaRequestOptions {

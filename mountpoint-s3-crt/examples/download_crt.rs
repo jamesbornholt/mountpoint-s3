@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::os::unix::ffi::OsStrExt as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context};
@@ -81,6 +82,11 @@ struct CrtClientConfig {
     part_size: usize,
 }
 
+#[derive(Debug, Default, Clone)]
+struct RequestStats {
+    status_codes: HashMap<Option<i32>, usize>,
+}
+
 impl CrtClient {
     /// Create a new S3 CRT client
     fn new(config: CrtClientConfig) -> anyhow::Result<Self> {
@@ -141,7 +147,7 @@ impl CrtClient {
         bucket: &str,
         key: &str,
         body_callback: impl FnMut(u64, &[u8]) + Send + 'static,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<RequestStats> {
         let endpoint = Endpoint::resolve(&self.config.region, bucket)?;
 
         let mut message = Message::new_request(&self.allocator)?;
@@ -157,7 +163,10 @@ impl CrtClient {
             Some(false),
         );
 
-        let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
+        let (tx, rx) = oneshot::channel();
+
+        let request_stats = Arc::new(Mutex::new(RequestStats::default()));
+        let request_stats_clone = request_stats.clone();
 
         let mut request_options = MetaRequestOptions::default();
         request_options
@@ -165,6 +174,16 @@ impl CrtClient {
             .message(message)
             .endpoint(endpoint.uri)
             .signing_config(signing_config)
+            .on_telemetry(move |metrics| {
+                let status_code = metrics.status_code();
+                request_stats_clone
+                    .lock()
+                    .unwrap()
+                    .status_codes
+                    .entry(status_code)
+                    .and_modify(|count| *count += 1)
+                    .or_insert(1);
+            })
             .on_body(body_callback)
             .on_finish({
                 let bucket = bucket.to_owned();
@@ -174,7 +193,7 @@ impl CrtClient {
                     let ret = if result.is_err() {
                         Err(anyhow::anyhow!("request failed: {:?}", result))
                     } else {
-                        Ok(())
+                        Ok(request_stats.lock().unwrap().clone())
                     };
                     let _ = tx.send(ret);
                 }
@@ -227,7 +246,7 @@ fn main() -> anyhow::Result<()> {
         let start = Instant::now();
         let num_bytes = block_on(async {
             let bytes_received = Arc::new(AtomicUsize::new(0));
-            client
+            let stats = client
                 .get_object(&args.bucket, &args.key, {
                     let bytes_received = bytes_received.clone();
                     move |_, body| {
@@ -235,6 +254,7 @@ fn main() -> anyhow::Result<()> {
                     }
                 })
                 .await?;
+            tracing::info!(?stats, "request stats");
             Ok::<_, anyhow::Error>(bytes_received.load(Ordering::SeqCst))
         })?;
         let elapsed = start.elapsed();

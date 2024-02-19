@@ -1,0 +1,54 @@
+diff --git a/include/aws/s3/private/s3_meta_request_impl.h b/include/aws/s3/private/s3_meta_request_impl.h
+index d5d3fcb..0944e95 100644
+--- a/include/aws/s3/private/s3_meta_request_impl.h
++++ b/include/aws/s3/private/s3_meta_request_impl.h
+@@ -261,6 +261,8 @@ struct aws_s3_meta_request {
+ 
+     /* running checksum of all the parts of a default get, or ranged get meta request*/
+     struct aws_s3_checksum *meta_request_level_running_response_sum;
++
++    uint32_t max_num_connections_per_vip;
+ };
+ 
+ /* Info for each part, that we need to remember until we send CompleteMultipartUpload */
+diff --git a/include/aws/s3/s3_client.h b/include/aws/s3/s3_client.h
+index 1cd6d9c..5701172 100644
+--- a/include/aws/s3/s3_client.h
++++ b/include/aws/s3/s3_client.h
+@@ -732,6 +732,8 @@ struct aws_s3_meta_request_options {
+      * This is just used as an estimate, so it's okay to provide an approximate value if the exact size is unknown.
+      */
+     uint64_t *object_size_hint;
++
++    uint32_t max_num_connections_per_vip;
+ };
+ 
+ /* Result details of a meta request.
+diff --git a/source/s3_client.c b/source/s3_client.c
+index d4eafcc..c379504 100644
+--- a/source/s3_client.c
++++ b/source/s3_client.c
+@@ -158,6 +158,10 @@ uint32_t aws_s3_client_get_max_active_connections(
+     if (meta_request != NULL) {
+         num_connections_per_vip = g_num_conns_per_vip_meta_request_look_up[meta_request->type];
+ 
++        if (meta_request->max_num_connections_per_vip) {
++            num_connections_per_vip = meta_request->max_num_connections_per_vip;
++        }
++
+         struct aws_s3_endpoint *endpoint = meta_request->endpoint;
+         AWS_ASSERT(endpoint != NULL);
+ 
+diff --git a/source/s3_meta_request.c b/source/s3_meta_request.c
+index f79a55e..be4d433 100644
+--- a/source/s3_meta_request.c
++++ b/source/s3_meta_request.c
+@@ -311,6 +311,8 @@ int aws_s3_meta_request_init_base(
+     meta_request->impl = impl;
+     meta_request->vtable = vtable;
+ 
++    meta_request->max_num_connections_per_vip = options->max_num_connections_per_vip;
++
+     return AWS_OP_SUCCESS;
+ error:
+     s_s3_meta_request_destroy((void *)meta_request);
