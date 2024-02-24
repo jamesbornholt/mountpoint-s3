@@ -397,7 +397,7 @@ where
     if args.foreground {
         init_logging(args.logging_config()).context("failed to initialize logging")?;
 
-        let _metrics = metrics::install();
+        let _metrics = metrics::install(true);
 
         // mount file system as a foreground process
         let session = mount(args, client_builder)?;
@@ -424,7 +424,7 @@ where
                 let args = CliArgs::parse();
                 init_logging(args.logging_config()).context("failed to initialize logging")?;
 
-                let _metrics = metrics::install();
+                let _metrics = metrics::install(true);
 
                 let session = mount(args, client_builder);
 

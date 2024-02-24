@@ -10,10 +10,13 @@ use dashmap::DashMap;
 use metrics::{Key, Metadata, Recorder};
 
 use crate::sync::mpsc::{channel, RecvTimeoutError, Sender};
-use crate::sync::Arc;
+use crate::sync::{Arc, Mutex};
 
 mod data;
 use data::*;
+
+mod resources;
+use resources::ResourceMetrics;
 
 mod tracing_span;
 pub use tracing_span::metrics_tracing_span_layer;
@@ -29,8 +32,8 @@ pub const TARGET_NAME: &str = "mountpoint_s3::metrics";
 /// done with their work; metrics generated after shutting down the sink will be lost.
 ///
 /// Panics if a sink has already been installed.
-pub fn install() -> MetricsSinkHandle {
-    let sink = Arc::new(MetricsSink::new());
+pub fn install(enable_resource_metrics: bool) -> MetricsSinkHandle {
+    let sink = Arc::new(MetricsSink::new(enable_resource_metrics));
 
     let (tx, rx) = channel();
 
@@ -64,12 +67,24 @@ pub fn install() -> MetricsSinkHandle {
 #[derive(Debug)]
 struct MetricsSink {
     metrics: DashMap<Key, Metric>,
+    // Option because it could be disabled, either at startup time or after an update failure
+    resources: Mutex<Option<ResourceMetrics>>,
 }
 
 impl MetricsSink {
-    fn new() -> Self {
+    fn new(enable_resource_metrics: bool) -> Self {
+        let resources = enable_resource_metrics
+            .then(|| {
+                ResourceMetrics::new()
+                    .inspect_err(|e| {
+                        tracing::warn!("failed to initialize system resource metrics: {}", e);
+                    })
+                    .ok()
+            })
+            .flatten();
         Self {
             metrics: DashMap::with_capacity(64),
+            resources: Mutex::new(resources),
         }
     }
 
@@ -88,8 +103,8 @@ impl MetricsSink {
         entry.as_histogram()
     }
 
-    /// Publish all this sink's metrics to `tracing` log messages
-    fn publish(&self) {
+    /// Collect all this sink's metrics into their string representations
+    fn collect(&self) -> impl Iterator<Item = String> {
         // Collect the output lines so we can sort them to make reading easier
         let mut metrics = vec![];
 
@@ -112,9 +127,33 @@ impl MetricsSink {
             metrics.push(format!("{}{}: {}", key.name(), labels, metric));
         }
 
+        {
+            let mut resources_locked = self.resources.lock().unwrap();
+            if let Some(resources) = resources_locked.as_mut() {
+                match resources.update_and_fmt() {
+                    Ok(results) => {
+                        // Only emit system resource metrics if we're already emitting something
+                        // else, as we don't want to spam the log file otherwise.
+                        if !metrics.is_empty() {
+                            metrics.extend(results.map(|m| format!("{}: {}", m.name, m.value)));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to update system resource metrics: {}", e);
+                        *resources_locked = None;
+                    }
+                }
+            }
+        }
+
         metrics.sort();
 
-        for metric in metrics {
+        metrics.into_iter()
+    }
+
+    /// Publish all this sink's metrics to `tracing` log messages
+    fn publish(&self) {
+        for metric in self.collect() {
             tracing::info!(target: TARGET_NAME, "{}", metric);
         }
     }
@@ -193,7 +232,7 @@ mod tests {
 
     #[test]
     fn basic_metrics() {
-        let sink = Arc::new(MetricsSink::new());
+        let sink = Arc::new(MetricsSink::new(false));
         let recorder = MetricsRecorder { sink: sink.clone() };
         with_local_recorder(&recorder, || {
             // Run twice to check reset works
@@ -282,6 +321,61 @@ mod tests {
                 assert!(inner.load_if_changed().is_some());
                 assert!(inner.load_if_changed().is_none());
             }
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resource_metrics() {
+        let sink = Arc::new(MetricsSink::new(true));
+        let recorder = MetricsRecorder { sink: sink.clone() };
+        with_local_recorder(&recorder, || {
+            // Emit a metric once to check the resource metrics are also emitted
+            metrics::counter!(TEST_COUNTER).increment(1);
+
+            let mut seen_counter = false;
+            let mut seen_system = false;
+            let mut seen_process = false;
+            for line in sink.collect() {
+                if line.starts_with(TEST_COUNTER) {
+                    seen_counter = true;
+                } else if line.starts_with("resource.system") {
+                    seen_system = true;
+                } else if line.starts_with("resource.process") {
+                    seen_process = true;
+                } else {
+                    panic!("unrecognized metric line {line}");
+                }
+            }
+            assert!(seen_counter);
+            assert!(seen_system);
+            assert!(seen_process);
+
+            // Now collect again, this time should see nothing because no other metrics were emitted
+            assert!(sink.collect().next().is_none());
+        });
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn resource_metrics_unavailable() {
+        let sink = Arc::new(MetricsSink::new(true));
+        let recorder = MetricsRecorder { sink: sink.clone() };
+        with_local_recorder(&recorder, || {
+            // Emit a metric once to check the resource metrics are also emitted
+            metrics::counter!(TEST_COUNTER).increment(1);
+
+            // Resource metrics aren't available on this platform, so the counter should be the only
+            // thing emitted
+            let mut seen_counter = false;
+            for line in sink.collect() {
+                assert!(line.starts_with(TEST_COUNTER));
+                seen_counter = true;
+            }
+            assert!(seen_counter);
+
+            // Now collect again, this time should see nothing because no other metrics were emitted
+            assert!(sink.collect().next().is_none());
         });
     }
 }
