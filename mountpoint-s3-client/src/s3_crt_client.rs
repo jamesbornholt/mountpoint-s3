@@ -464,12 +464,12 @@ impl S3CrtClientInner {
                 let range = metrics.response_headers().and_then(|headers| extract_range_header(&headers));
 
                 let message = if request_failure {
-                    "CRT request failed"
+                    "S3 request failed"
                 } else {
-                    "CRT request finished"
+                    "S3 request finished"
                 };
                 debug!(%request_type, ?crt_error, http_status, ?range, ?duration, ?ttfb, %request_id, "{}", message);
-                trace!(detailed_metrics=?metrics, "CRT request completed");
+                trace!(detailed_metrics=?metrics, "S3 request completed");
 
                 let op = span_telemetry.metadata().map(|m| m.name()).unwrap_or("unknown");
                 if let Some(ttfb) = ttfb {
@@ -535,11 +535,20 @@ impl S3CrtClientInner {
                         Ok(t)
                     }
                     Err(maybe_err) => {
+                        // Try to parse request header out of the failure. We can't just use the
+                        // telemetry callback because there might be multiple requests per meta
+                        // request, but these headers are known to be from the failed request.
+                        let request_id = match &request_result.error_response_headers {
+                            Some(headers) => headers.get("x-amz-request-id").map(|s| s.value().to_string_lossy().to_string()).ok(),
+                            None => None,
+                        };
+                        let request_id = request_id.unwrap_or_else(|| "<unknown>".into());
+
                         if let Some(error) = &maybe_err {
-                            event!(log_level, ?duration, ?error, "meta request failed");
+                            event!(log_level, ?duration, %request_id, ?error, "meta request failed");
                             debug!("failed meta request result: {:?}", request_result);
                         } else {
-                            event!(log_level, ?duration, ?request_result, "meta request failed");
+                            event!(log_level, ?duration, %request_id, ?request_result, "meta request failed");
                         }
 
                         // If it's not a real HTTP status, encode the CRT error in the metric instead
@@ -1237,8 +1246,8 @@ mod tests {
 
     #[test]
     fn parse_no_signing_credential_error() {
-        // 6146 is crt error code for AWS_AUTH_SIGNING_NO_CREDENTIALS
-        let result = make_crt_error_result(0, 6146.into());
+        let error_code = mountpoint_s3_crt_sys::aws_auth_errors::AWS_AUTH_SIGNING_NO_CREDENTIALS as i32;
+        let result = make_crt_error_result(0, error_code.into());
         let result = try_parse_generic_error(&result);
         let Some(S3RequestError::NoSigningCredentials) = result else {
             panic!("wrong result, got: {:?}", result);
@@ -1247,9 +1256,8 @@ mod tests {
 
     #[test]
     fn parse_test_other_crt_error() {
-        // 6144 is crt error code for AWS_AUTH_SIGNING_UNSUPPORTED_ALGORITHM, which is another signing error,
-        // but not no signing credential error
-        let error_code = 6144;
+        // A signing error that isn't "no signing credentials"
+        let error_code = mountpoint_s3_crt_sys::aws_auth_errors::AWS_AUTH_SIGNING_UNSUPPORTED_ALGORITHM as i32;
         let result = make_crt_error_result(0, error_code.into());
         let result = try_parse_generic_error(&result);
         let Some(S3RequestError::CrtError(error)) = result else {
