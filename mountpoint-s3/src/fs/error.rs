@@ -2,7 +2,6 @@
 
 use tracing::Level;
 
-use crate::inode::InodeError;
 use crate::upload::UploadWriteError;
 
 /// Generate an error that includes a conversion to a libc errno for use in replies to FUSE.
@@ -84,19 +83,6 @@ impl std::fmt::Display for Error {
     }
 }
 
-impl From<InodeError> for Error {
-    fn from(err: InodeError) -> Self {
-        let errno = err.to_errno();
-        Error {
-            errno,
-            message: String::from("inode error"),
-            source: Some(anyhow::anyhow!(err)),
-            // We are having WARN as the default level of logging for fuse errors
-            level: Level::WARN,
-        }
-    }
-}
-
 impl<E: std::error::Error + Send + Sync + 'static> From<UploadWriteError<E>> for Error {
     fn from(err: UploadWriteError<E>) -> Self {
         let errno = err.to_errno();
@@ -118,33 +104,6 @@ pub trait ToErrno {
 impl ToErrno for Error {
     fn to_errno(&self) -> libc::c_int {
         self.errno
-    }
-}
-
-impl ToErrno for InodeError {
-    fn to_errno(&self) -> libc::c_int {
-        match self {
-            InodeError::ClientError(_) => libc::EIO,
-            InodeError::FileDoesNotExist(_, _) => libc::ENOENT,
-            InodeError::InodeDoesNotExist(_) => libc::ENOENT,
-            InodeError::InvalidFileName(_) => libc::EINVAL,
-            InodeError::NotADirectory(_) => libc::ENOTDIR,
-            InodeError::IsDirectory(_) => libc::EISDIR,
-            InodeError::FileAlreadyExists(_) => libc::EEXIST,
-            // Not obvious what InodeNotWritable, InodeAlreadyWriting, InodeNotReadableWhileWriting should be.
-            // EINVAL or EROFS would also be reasonable -- but we'll treat them like sealed files.
-            InodeError::InodeNotWritable(_) => libc::EPERM,
-            InodeError::InodeInvalidWriteStatus(_) => libc::EPERM,
-            InodeError::InodeAlreadyWriting(_) => libc::EPERM,
-            InodeError::InodeNotReadableWhileWriting(_) => libc::EPERM,
-            InodeError::InodeNotWritableWhileReading(_) => libc::EPERM,
-            InodeError::CannotRemoveRemoteDirectory(_) => libc::EPERM,
-            InodeError::DirectoryNotEmpty(_) => libc::ENOTEMPTY,
-            InodeError::UnlinkNotPermittedWhileWriting(_) => libc::EPERM,
-            InodeError::CorruptedMetadata(_) => libc::EIO,
-            InodeError::SetAttrNotPermittedOnRemoteInode(_) => libc::EPERM,
-            InodeError::StaleInode { .. } => libc::ESTALE,
-        }
     }
 }
 

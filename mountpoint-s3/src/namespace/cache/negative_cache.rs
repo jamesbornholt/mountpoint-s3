@@ -2,8 +2,8 @@ use std::time::{Duration, Instant};
 
 use linked_hash_map::LinkedHashMap;
 
-use super::{expiry::Expiry, InodeNo};
-
+use crate::namespace::expiry::Expiry;
+use crate::namespace::InodeNo;
 use crate::sync::RwLock;
 
 /// A caches for negative lookups.

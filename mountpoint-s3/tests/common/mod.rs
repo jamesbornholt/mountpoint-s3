@@ -11,6 +11,8 @@ pub mod s3;
 use fuser::{FileAttr, FileType};
 use futures::executor::ThreadPool;
 use mountpoint_s3::fs::{DirectoryEntry, DirectoryReplier};
+use mountpoint_s3::namespace::bucket::{Superblock, SuperblockConfig};
+use mountpoint_s3::namespace::Inode;
 use mountpoint_s3::prefetch::{default_prefetch, DefaultPrefetcher};
 use mountpoint_s3::prefix::Prefix;
 use mountpoint_s3::{S3Filesystem, S3FilesystemConfig};
@@ -21,7 +23,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::Arc;
 
-pub type TestS3Filesystem<Client> = S3Filesystem<Client, DefaultPrefetcher<ThreadPool>>;
+pub type TestS3Filesystem<Client> = S3Filesystem<Superblock<Client>, Client, DefaultPrefetcher<ThreadPool>>;
 
 pub fn make_test_filesystem(
     bucket: &str,
@@ -46,11 +48,16 @@ pub fn make_test_filesystem_with_client<Client>(
     config: S3FilesystemConfig,
 ) -> TestS3Filesystem<Client>
 where
-    Client: ObjectClient + Send + Sync + 'static,
+    Client: ObjectClient + Send + Sync + Clone + 'static,
 {
     let runtime = ThreadPool::builder().pool_size(1).create().unwrap();
     let prefetcher = default_prefetch(runtime, Default::default());
-    S3Filesystem::new(client, prefetcher, bucket, prefix, config)
+    let superblock_config = SuperblockConfig {
+        cache_config: config.cache_config.clone(),
+        s3_personality: config.s3_personality,
+    };
+    let ns = Superblock::new(bucket, prefix, client.clone(), superblock_config);
+    S3Filesystem::new(ns, client, prefetcher, bucket, prefix, config)
 }
 
 #[track_caller]
@@ -62,14 +69,14 @@ pub fn assert_attr(attr: FileAttr, ftype: FileType, size: u64, uid: u32, gid: u3
     assert_eq!(attr.perm, perm);
 }
 
-#[derive(Debug, Default)]
-pub struct DirectoryReply {
+#[derive(Debug)]
+pub struct DirectoryReply<I: Inode> {
     readdir_limit: usize,
-    pub entries: VecDeque<DirectoryEntry>,
+    pub entries: VecDeque<DirectoryEntry<I>>,
 }
 
-impl DirectoryReplier for &mut DirectoryReply {
-    fn add(&mut self, entry: DirectoryEntry) -> bool {
+impl<I: Inode> DirectoryReplier<I> for &mut DirectoryReply<I> {
+    fn add(&mut self, entry: DirectoryEntry<I>) -> bool {
         if self.readdir_limit > 0 && !self.entries.is_empty() && self.entries.len() % self.readdir_limit == 0 {
             true
         } else {
@@ -79,16 +86,22 @@ impl DirectoryReplier for &mut DirectoryReply {
     }
 }
 
-impl DirectoryReply {
+impl<I: Inode> DirectoryReply<I> {
     pub fn new(max_entries: usize) -> Self {
         Self {
             readdir_limit: max_entries,
-            ..Default::default()
+            entries: VecDeque::new(),
         }
     }
 
     pub fn clear(&mut self) {
         self.entries.clear();
+    }
+}
+
+impl<I: Inode> Default for DirectoryReply<I> {
+    fn default() -> Self {
+        Self::new(0)
     }
 }
 

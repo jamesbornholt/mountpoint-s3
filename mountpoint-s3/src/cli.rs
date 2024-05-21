@@ -31,6 +31,7 @@ use crate::fs::{CacheConfig, S3FilesystemConfig, ServerSideEncryption, TimeToLiv
 use crate::fuse::session::FuseSession;
 use crate::fuse::S3FuseFilesystem;
 use crate::logging::{init_logging, LoggingConfig};
+use crate::namespace::bucket::{Superblock, SuperblockConfig};
 use crate::prefetch::{caching_prefetch, default_prefetch, Prefetch};
 use crate::prefix::Prefix;
 use crate::s3::S3Personality;
@@ -420,7 +421,7 @@ impl CliArgs {
 pub fn main<ClientBuilder, Client, Runtime>(client_builder: ClientBuilder) -> anyhow::Result<()>
 where
     ClientBuilder: FnOnce(&CliArgs) -> anyhow::Result<(Client, Runtime, S3Personality)>,
-    Client: ObjectClient + Send + Sync + 'static,
+    Client: ObjectClient + Send + Sync + Clone + 'static,
     Runtime: Spawn + Send + Sync + 'static,
 {
     let args = CliArgs::parse();
@@ -637,7 +638,7 @@ pub fn create_s3_client(args: &CliArgs) -> anyhow::Result<(S3CrtClient, EventLoo
 fn mount<ClientBuilder, Client, Runtime>(args: CliArgs, client_builder: ClientBuilder) -> anyhow::Result<FuseSession>
 where
     ClientBuilder: FnOnce(&CliArgs) -> anyhow::Result<(Client, Runtime, S3Personality)>,
-    Client: ObjectClient + Send + Sync + 'static,
+    Client: ObjectClient + Send + Sync + Clone + 'static,
     Runtime: Spawn + Send + Sync + 'static,
 {
     tracing::info!("mount-s3 {}", build_info::FULL_VERSION);
@@ -768,10 +769,15 @@ fn create_filesystem<Client, Prefetcher>(
     bucket_description: &str,
 ) -> anyhow::Result<FuseSession>
 where
-    Client: ObjectClient + Send + Sync + 'static,
+    Client: ObjectClient + Send + Sync + Clone + 'static,
     Prefetcher: Prefetch + Send + Sync + 'static,
 {
-    let fs = S3FuseFilesystem::new(client, prefetcher, bucket_name, prefix, filesystem_config);
+    let superblock_config = SuperblockConfig {
+        cache_config: filesystem_config.cache_config.clone(),
+        s3_personality: filesystem_config.s3_personality,
+    };
+    let ns = Superblock::new(bucket_name, prefix, client.clone(), superblock_config);
+    let fs = S3FuseFilesystem::new(ns, client, prefetcher, bucket_name, prefix, filesystem_config);
     let session = Session::new(fs, &fuse_session_config.mount_point, &fuse_session_config.options)
         .context("Failed to create FUSE session")?;
     let session = FuseSession::new(session, fuse_session_config.max_threads).context("Failed to start FUSE session")?;

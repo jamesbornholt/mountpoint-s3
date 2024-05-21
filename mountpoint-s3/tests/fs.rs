@@ -2,7 +2,8 @@
 
 use fuser::FileType;
 use libc::S_IFREG;
-use mountpoint_s3::fs::{CacheConfig, ToErrno, FUSE_ROOT_INODE};
+use mountpoint_s3::fs::{CacheConfig, ToErrno};
+use mountpoint_s3::namespace::ROOT_INODE;
 use mountpoint_s3::prefix::Prefix;
 use mountpoint_s3::s3::S3Personality;
 use mountpoint_s3::S3FilesystemConfig;
@@ -50,7 +51,7 @@ async fn test_read_dir_root(prefix: &str) {
     let file_perm: u16 = 0o644;
 
     // Listing the root directory doesn't require resolving it first, can just opendir the root inode
-    let dir_handle = fs.opendir(FUSE_ROOT_INODE, 0).await.unwrap().fh;
+    let dir_handle = fs.opendir(ROOT_INODE, 0).await.unwrap().fh;
     let mut reply = Default::default();
     let _reply = fs.readdirplus(1, dir_handle, 0, &mut reply).await.unwrap();
 
@@ -58,10 +59,10 @@ async fn test_read_dir_root(prefix: &str) {
 
     // TODO `stat` on these needs to work
     assert_eq!(reply.entries[0].name, ".");
-    assert_eq!(reply.entries[0].ino, FUSE_ROOT_INODE);
+    assert_eq!(reply.entries[0].ino, ROOT_INODE);
     assert_attr(reply.entries[0].attr, FileType::Directory, 0, uid, gid, dir_perm);
     assert_eq!(reply.entries[1].name, "..");
-    assert_eq!(reply.entries[1].ino, FUSE_ROOT_INODE);
+    assert_eq!(reply.entries[1].ino, ROOT_INODE);
     assert_attr(reply.entries[1].attr, FileType::Directory, 0, uid, gid, dir_perm);
 
     let mut offset = reply.entries[0].offset.max(reply.entries[1].offset);
@@ -89,13 +90,10 @@ async fn test_read_dir_root(prefix: &str) {
     assert!(offset > 0);
 
     let mut reply = Default::default();
-    let _reply = fs
-        .readdir(FUSE_ROOT_INODE, dir_handle, offset, &mut reply)
-        .await
-        .unwrap();
+    let _reply = fs.readdir(ROOT_INODE, dir_handle, offset, &mut reply).await.unwrap();
     assert_eq!(reply.entries.len(), 0);
 
-    fs.releasedir(FUSE_ROOT_INODE, dir_handle, 0).await.unwrap();
+    fs.releasedir(ROOT_INODE, dir_handle, 0).await.unwrap();
 }
 
 #[test_case(""; "unprefixed")]
@@ -123,7 +121,7 @@ async fn test_read_dir_nested(prefix: &str) {
     let dir_perm: u16 = 0o755;
     let file_perm: u16 = 0o644;
 
-    let entry = fs.lookup(FUSE_ROOT_INODE, "dir1".as_ref()).await.unwrap();
+    let entry = fs.lookup(ROOT_INODE, "dir1".as_ref()).await.unwrap();
     assert_eq!(entry.attr.kind, FileType::Directory);
     let dir_ino = entry.attr.ino;
 
@@ -137,7 +135,7 @@ async fn test_read_dir_nested(prefix: &str) {
     assert_eq!(reply.entries[0].ino, dir_ino);
     assert_attr(reply.entries[0].attr, FileType::Directory, 0, uid, gid, dir_perm);
     assert_eq!(reply.entries[1].name, "..");
-    assert_eq!(reply.entries[1].ino, FUSE_ROOT_INODE);
+    assert_eq!(reply.entries[1].ino, ROOT_INODE);
     assert_attr(reply.entries[1].attr, FileType::Directory, 0, uid, gid, dir_perm);
 
     let mut offset = reply.entries[0].offset.max(reply.entries[1].offset);
@@ -188,7 +186,7 @@ async fn test_lookup_negative_cached() {
     let list_counter = client.new_counter(Operation::ListObjectsV2);
 
     let _ = fs
-        .lookup(FUSE_ROOT_INODE, "file1.txt".as_ref())
+        .lookup(ROOT_INODE, "file1.txt".as_ref())
         .await
         .expect_err("should fail as no object exists");
     assert_eq!(head_counter.count(), 1);
@@ -196,7 +194,7 @@ async fn test_lookup_negative_cached() {
 
     // Check negative caching
     let _ = fs
-        .lookup(FUSE_ROOT_INODE, "file1.txt".as_ref())
+        .lookup(ROOT_INODE, "file1.txt".as_ref())
         .await
         .expect_err("should fail as no object exists");
     assert_eq!(head_counter.count(), 1);
@@ -205,7 +203,7 @@ async fn test_lookup_negative_cached() {
     client.add_object("file1.txt", MockObject::constant(0xa1, 15, ETag::for_tests()));
 
     let _ = fs
-        .lookup(FUSE_ROOT_INODE, "file1.txt".as_ref())
+        .lookup(ROOT_INODE, "file1.txt".as_ref())
         .await
         .expect_err("should fail as mountpoint should use negative cache");
     assert_eq!(head_counter.count(), 1);
@@ -213,12 +211,9 @@ async fn test_lookup_negative_cached() {
 
     // Use readdirplus to discover the new file
     {
-        let dir_handle = fs.opendir(FUSE_ROOT_INODE, 0).await.unwrap().fh;
+        let dir_handle = fs.opendir(ROOT_INODE, 0).await.unwrap().fh;
         let mut reply = Default::default();
-        let _reply = fs
-            .readdirplus(FUSE_ROOT_INODE, dir_handle, 0, &mut reply)
-            .await
-            .unwrap();
+        let _reply = fs.readdirplus(ROOT_INODE, dir_handle, 0, &mut reply).await.unwrap();
 
         assert_eq!(reply.entries.len(), 2 + 1);
 
@@ -235,7 +230,7 @@ async fn test_lookup_negative_cached() {
     assert_eq!(list_counter.count(), 2);
 
     let _ = fs
-        .lookup(FUSE_ROOT_INODE, "file1.txt".as_ref())
+        .lookup(ROOT_INODE, "file1.txt".as_ref())
         .await
         .expect("should succeed as object is cached and exists");
     assert_eq!(head_counter.count(), 1);
@@ -260,7 +255,7 @@ async fn test_lookup_then_open_cached() {
     let head_counter = client.new_counter(Operation::HeadObject);
     let list_counter = client.new_counter(Operation::ListObjectsV2);
 
-    let entry = fs.lookup(FUSE_ROOT_INODE, "file1.txt".as_ref()).await.unwrap();
+    let entry = fs.lookup(ROOT_INODE, "file1.txt".as_ref()).await.unwrap();
     let ino = entry.attr.ino;
     assert_eq!(head_counter.count(), 1);
     assert_eq!(list_counter.count(), 1);
@@ -292,7 +287,7 @@ async fn test_lookup_then_open_no_cache() {
     let head_counter = client.new_counter(Operation::HeadObject);
     let list_counter = client.new_counter(Operation::ListObjectsV2);
 
-    let entry = fs.lookup(FUSE_ROOT_INODE, "file1.txt".as_ref()).await.unwrap();
+    let entry = fs.lookup(ROOT_INODE, "file1.txt".as_ref()).await.unwrap();
     let ino = entry.attr.ino;
     assert_eq!(head_counter.count(), 1);
     assert_eq!(list_counter.count(), 1);
@@ -328,7 +323,7 @@ async fn test_readdir_then_open_cached() {
         let head_counter = client.new_counter(Operation::HeadObject);
         let list_counter = client.new_counter(Operation::ListObjectsV2);
 
-        let dir_ino = FUSE_ROOT_INODE;
+        let dir_ino = ROOT_INODE;
         let dir_handle = fs.opendir(dir_ino, 0).await.unwrap().fh;
         let mut reply = Default::default();
         let _reply = fs.readdirplus(dir_ino, dir_handle, 0, &mut reply).await.unwrap();
@@ -375,7 +370,7 @@ async fn test_unlink_cached() {
 
     client.add_object("file1.txt", MockObject::constant(0xa1, 15, ETag::for_tests()));
 
-    let parent_ino = FUSE_ROOT_INODE;
+    let parent_ino = ROOT_INODE;
     let head_counter = client.new_counter(Operation::HeadObject);
     let list_counter = client.new_counter(Operation::ListObjectsV2);
 
@@ -422,7 +417,7 @@ async fn test_mknod_cached() {
     };
     let (client, fs) = make_test_filesystem(BUCKET_NAME, &Default::default(), fs_config);
 
-    let parent = FUSE_ROOT_INODE;
+    let parent = ROOT_INODE;
     let head_counter = client.new_counter(Operation::HeadObject);
     let list_counter = client.new_counter(Operation::ListObjectsV2);
 
@@ -462,7 +457,7 @@ async fn test_random_read(object_size: usize) {
     client.add_object("file", MockObject::from_bytes(&expected[..], ETag::for_tests()));
 
     // Find the object
-    let dir_handle = fs.opendir(FUSE_ROOT_INODE, 0).await.unwrap().fh;
+    let dir_handle = fs.opendir(ROOT_INODE, 0).await.unwrap().fh;
     let mut reply = Default::default();
     let _reply = fs.readdirplus(1, dir_handle, 0, &mut reply).await.unwrap();
 
@@ -487,7 +482,7 @@ async fn test_random_read(object_size: usize) {
     }
 
     fs.release(ino, fh, 0, None, true).await.unwrap();
-    fs.releasedir(FUSE_ROOT_INODE, dir_handle, 0).await.unwrap();
+    fs.releasedir(ROOT_INODE, dir_handle, 0).await.unwrap();
 }
 
 #[test_case(""; "unprefixed")]
@@ -508,7 +503,7 @@ async fn test_implicit_directory_shadow(prefix: &str) {
         MockObject::constant(0xa2, 15, ETag::from_str("test_etag_2").unwrap()),
     );
 
-    let entry = fs.lookup(FUSE_ROOT_INODE, "dir1".as_ref()).await.unwrap();
+    let entry = fs.lookup(ROOT_INODE, "dir1".as_ref()).await.unwrap();
     assert_eq!(entry.attr.kind, FileType::Directory);
     let dir_ino = entry.attr.ino;
 
@@ -521,7 +516,7 @@ async fn test_implicit_directory_shadow(prefix: &str) {
     assert_eq!(reply.entries[0].name, ".");
     assert_eq!(reply.entries[0].ino, dir_ino);
     assert_eq!(reply.entries[1].name, "..");
-    assert_eq!(reply.entries[1].ino, FUSE_ROOT_INODE);
+    assert_eq!(reply.entries[1].ino, ROOT_INODE);
 
     assert_eq!(reply.entries[2].name, "file2.txt");
     assert_eq!(reply.entries[2].attr.kind, FileType::RegularFile);
@@ -535,7 +530,7 @@ async fn test_implicit_directory_shadow(prefix: &str) {
     fs.release(reply.entries[2].ino, fh, 0, None, true).await.unwrap();
 
     // Explicitly looking up the shadowed file should fail
-    let entry = fs.lookup(FUSE_ROOT_INODE, "dir1/".as_ref()).await;
+    let entry = fs.lookup(ROOT_INODE, "dir1/".as_ref()).await;
     assert!(matches!(entry, Err(e) if e.to_errno() == libc::EINVAL));
 
     // TODO test removing the directory, removing the file
@@ -559,7 +554,7 @@ async fn test_sequential_write(write_size: usize) {
     client.add_object("dir1/file1.bin", MockObject::constant(0xa1, 15, ETag::for_tests()));
 
     // Find the dir1 directory
-    let entry = fs.lookup(FUSE_ROOT_INODE, "dir1".as_ref()).await.unwrap();
+    let entry = fs.lookup(ROOT_INODE, "dir1".as_ref()).await.unwrap();
     assert_eq!(entry.attr.kind, FileType::Directory);
     let dir_ino = entry.attr.ino;
 
@@ -649,10 +644,7 @@ async fn test_unordered_write_fails(offset: i64) {
     let (_client, fs) = make_test_filesystem(BUCKET_NAME, &Default::default(), Default::default());
 
     let mode = libc::S_IFREG | libc::S_IRWXU; // regular file + 0700 permissions
-    let dentry = fs
-        .mknod(FUSE_ROOT_INODE, "file2.bin".as_ref(), mode, 0, 0)
-        .await
-        .unwrap();
+    let dentry = fs.mknod(ROOT_INODE, "file2.bin".as_ref(), mode, 0, 0).await.unwrap();
     assert_eq!(dentry.attr.size, 0);
     let file_ino = dentry.attr.ino;
 
@@ -688,10 +680,7 @@ async fn test_duplicate_write_fails() {
     let (_client, fs) = make_test_filesystem(BUCKET_NAME, &Default::default(), Default::default());
 
     let mode = libc::S_IFREG | libc::S_IRWXU; // regular file + 0700 permissions
-    let dentry = fs
-        .mknod(FUSE_ROOT_INODE, "file2.bin".as_ref(), mode, 0, 0)
-        .await
-        .unwrap();
+    let dentry = fs.mknod(ROOT_INODE, "file2.bin".as_ref(), mode, 0, 0).await.unwrap();
     assert_eq!(dentry.attr.size, 0);
     let file_ino = dentry.attr.ino;
 
@@ -738,7 +727,7 @@ async fn test_upload_aborted_on_write_failure() {
     );
 
     let mode = libc::S_IFREG | libc::S_IRWXU; // regular file + 0700 permissions
-    let dentry = fs.mknod(FUSE_ROOT_INODE, FILE_NAME.as_ref(), mode, 0, 0).await.unwrap();
+    let dentry = fs.mknod(ROOT_INODE, FILE_NAME.as_ref(), mode, 0, 0).await.unwrap();
     assert_eq!(dentry.attr.size, 0);
     let file_ino = dentry.attr.ino;
 
@@ -815,7 +804,7 @@ async fn test_upload_aborted_on_fsync_failure() {
     );
 
     let mode = libc::S_IFREG | libc::S_IRWXU; // regular file + 0700 permissions
-    let dentry = fs.mknod(FUSE_ROOT_INODE, FILE_NAME.as_ref(), mode, 0, 0).await.unwrap();
+    let dentry = fs.mknod(ROOT_INODE, FILE_NAME.as_ref(), mode, 0, 0).await.unwrap();
     assert_eq!(dentry.attr.size, 0);
     let file_ino = dentry.attr.ino;
 
@@ -877,7 +866,7 @@ async fn test_upload_aborted_on_release_failure() {
     );
 
     let mode = libc::S_IFREG | libc::S_IRWXU; // regular file + 0700 permissions
-    let dentry = fs.mknod(FUSE_ROOT_INODE, FILE_NAME.as_ref(), mode, 0, 0).await.unwrap();
+    let dentry = fs.mknod(ROOT_INODE, FILE_NAME.as_ref(), mode, 0, 0).await.unwrap();
     assert_eq!(dentry.attr.size, 0);
     let file_ino = dentry.attr.ino;
 
@@ -926,19 +915,19 @@ async fn test_stat_block_size() {
         MockObject::constant(0xa3, 4097, ETag::from_str("test_etag_4").unwrap()),
     );
 
-    let lookup = fs.lookup(FUSE_ROOT_INODE, "file0.txt".as_ref()).await.unwrap();
+    let lookup = fs.lookup(ROOT_INODE, "file0.txt".as_ref()).await.unwrap();
     assert_eq!(lookup.attr.blocks, 0);
     assert_eq!(lookup.attr.blksize, 4096);
 
-    let lookup = fs.lookup(FUSE_ROOT_INODE, "file1.txt".as_ref()).await.unwrap();
+    let lookup = fs.lookup(ROOT_INODE, "file1.txt".as_ref()).await.unwrap();
     assert_eq!(lookup.attr.blocks, 1);
     assert_eq!(lookup.attr.blksize, 4096);
 
-    let lookup = fs.lookup(FUSE_ROOT_INODE, "file4096.txt".as_ref()).await.unwrap();
+    let lookup = fs.lookup(ROOT_INODE, "file4096.txt".as_ref()).await.unwrap();
     assert_eq!(lookup.attr.blocks, 8);
     assert_eq!(lookup.attr.blksize, 4096);
 
-    let lookup = fs.lookup(FUSE_ROOT_INODE, "file4097.txt".as_ref()).await.unwrap();
+    let lookup = fs.lookup(ROOT_INODE, "file4097.txt".as_ref()).await.unwrap();
     assert_eq!(lookup.attr.blocks, 9);
     assert_eq!(lookup.attr.blksize, 4096);
 }
@@ -958,24 +947,18 @@ async fn test_lookup_removes_old_children(key: &str) {
     let child_name = key.split_once('/').map(|(p, _)| p).unwrap_or(key);
 
     // Ensure the file is visible in mountpoint
-    fs.lookup(FUSE_ROOT_INODE, child_name.as_ref()).await.unwrap();
+    fs.lookup(ROOT_INODE, child_name.as_ref()).await.unwrap();
 
     // Remove object on the client
     client.remove_object(key);
 
-    fs.lookup(FUSE_ROOT_INODE, child_name.as_ref())
+    fs.lookup(ROOT_INODE, child_name.as_ref())
         .await
         .expect_err("the child should not be visible");
 
-    fs.mknod(
-        FUSE_ROOT_INODE,
-        child_name.as_ref(),
-        libc::S_IFREG | libc::S_IRWXU,
-        0,
-        0,
-    )
-    .await
-    .expect("should create a new child with the same name");
+    fs.mknod(ROOT_INODE, child_name.as_ref(), libc::S_IFREG | libc::S_IRWXU, 0, 0)
+        .await
+        .expect("should create a new child with the same name");
 }
 
 #[test_case(""; "unprefixed")]
@@ -987,17 +970,14 @@ async fn test_local_dir(prefix: &str) {
 
     // Create local directory
     let dirname = "local";
-    let dir_entry = fs
-        .mkdir(FUSE_ROOT_INODE, dirname.as_ref(), libc::S_IFDIR, 0)
-        .await
-        .unwrap();
+    let dir_entry = fs.mkdir(ROOT_INODE, dirname.as_ref(), libc::S_IFDIR, 0).await.unwrap();
 
     assert_eq!(dir_entry.attr.kind, FileType::Directory);
     let dir_ino = dir_entry.attr.ino;
 
     assert!(!client.contains_prefix(&format!("{prefix}{dirname}")));
 
-    let lookup_entry = fs.lookup(FUSE_ROOT_INODE, dirname.as_ref()).await.unwrap();
+    let lookup_entry = fs.lookup(ROOT_INODE, dirname.as_ref()).await.unwrap();
     assert_eq!(lookup_entry.attr, dir_entry.attr);
 
     // Write an object into the directory
@@ -1017,7 +997,7 @@ async fn test_local_dir(prefix: &str) {
     client.remove_object(&format!("{prefix}{dirname}/{filename}"));
 
     // Verify that the directory disappeared
-    let lookup = fs.lookup(FUSE_ROOT_INODE, dirname.as_ref()).await;
+    let lookup = fs.lookup(ROOT_INODE, dirname.as_ref()).await;
     assert!(matches!(lookup, Err(e) if e.to_errno() == libc::ENOENT));
 }
 
@@ -1033,20 +1013,20 @@ async fn test_directory_shadowing_lookup() {
     let name = "foo";
     client.add_object(name, b"foo".into());
 
-    let lookup_entry = fs.lookup(FUSE_ROOT_INODE, name.as_ref()).await.unwrap();
+    let lookup_entry = fs.lookup(ROOT_INODE, name.as_ref()).await.unwrap();
     assert_eq!(lookup_entry.attr.kind, FileType::RegularFile);
 
     // Add another object, whose prefix shadows the first
     let nested = format!("{name}/bar");
     client.add_object(&nested, b"bar".into());
 
-    let lookup_entry = fs.lookup(FUSE_ROOT_INODE, name.as_ref()).await.unwrap();
+    let lookup_entry = fs.lookup(ROOT_INODE, name.as_ref()).await.unwrap();
     assert_eq!(lookup_entry.attr.kind, FileType::Directory);
 
     // Remove the second object
     client.remove_object(&nested);
 
-    let lookup_entry = fs.lookup(FUSE_ROOT_INODE, name.as_ref()).await.unwrap();
+    let lookup_entry = fs.lookup(ROOT_INODE, name.as_ref()).await.unwrap();
     assert_eq!(lookup_entry.attr.kind, FileType::RegularFile);
 }
 
@@ -1061,7 +1041,7 @@ async fn test_directory_shadowing_readdir() {
     // Add `foo/bar` as a file
     client.add_object("foo/bar", b"foo/bar".into());
 
-    let foo_dir = fs.lookup(FUSE_ROOT_INODE, "foo".as_ref()).await.unwrap();
+    let foo_dir = fs.lookup(ROOT_INODE, "foo".as_ref()).await.unwrap();
     assert_eq!(foo_dir.attr.kind, FileType::Directory);
 
     let bar_dentry = {
@@ -1138,10 +1118,10 @@ async fn test_readdir_vs_readdirplus() {
     client.add_object("baz/foo", b"foo".into());
 
     let readdir_entries = {
-        let dir_handle = fs.opendir(FUSE_ROOT_INODE, 0).await.unwrap().fh;
+        let dir_handle = fs.opendir(ROOT_INODE, 0).await.unwrap().fh;
         let mut reply = Default::default();
-        let _reply = fs.readdir(FUSE_ROOT_INODE, dir_handle, 0, &mut reply).await.unwrap();
-        fs.releasedir(FUSE_ROOT_INODE, dir_handle, 0).await.unwrap();
+        let _reply = fs.readdir(ROOT_INODE, dir_handle, 0, &mut reply).await.unwrap();
+        fs.releasedir(ROOT_INODE, dir_handle, 0).await.unwrap();
 
         // Skip . and ..
         reply.entries.into_iter().skip(2).collect::<Vec<_>>()
@@ -1162,13 +1142,10 @@ async fn test_readdir_vs_readdirplus() {
     }
 
     let readdirplus_entries = {
-        let dir_handle = fs.opendir(FUSE_ROOT_INODE, 0).await.unwrap().fh;
+        let dir_handle = fs.opendir(ROOT_INODE, 0).await.unwrap().fh;
         let mut reply = Default::default();
-        let _reply = fs
-            .readdirplus(FUSE_ROOT_INODE, dir_handle, 0, &mut reply)
-            .await
-            .unwrap();
-        fs.releasedir(FUSE_ROOT_INODE, dir_handle, 0).await.unwrap();
+        let _reply = fs.readdirplus(ROOT_INODE, dir_handle, 0, &mut reply).await.unwrap();
+        fs.releasedir(ROOT_INODE, dir_handle, 0).await.unwrap();
 
         // Skip . and ..
         reply.entries.into_iter().skip(2).collect::<Vec<_>>()
@@ -1217,13 +1194,10 @@ async fn test_flexible_retrieval_objects() {
         client.add_object(name, object);
     }
 
-    let dir_handle = fs.opendir(FUSE_ROOT_INODE, 0).await.unwrap().fh;
+    let dir_handle = fs.opendir(ROOT_INODE, 0).await.unwrap().fh;
     let mut reply = Default::default();
-    let _reply = fs
-        .readdirplus(FUSE_ROOT_INODE, dir_handle, 0, &mut reply)
-        .await
-        .unwrap();
-    fs.releasedir(FUSE_ROOT_INODE, dir_handle, 0).await.unwrap();
+    let _reply = fs.readdirplus(ROOT_INODE, dir_handle, 0, &mut reply).await.unwrap();
+    fs.releasedir(ROOT_INODE, dir_handle, 0).await.unwrap();
 
     // Skip . and ..
     let iter = reply.entries.into_iter().skip(2);
@@ -1260,7 +1234,7 @@ async fn test_flexible_retrieval_objects() {
         });
         client.add_object(&file_name, object);
 
-        let lookup = fs.lookup(FUSE_ROOT_INODE, file_name.as_ref()).await.unwrap();
+        let lookup = fs.lookup(ROOT_INODE, file_name.as_ref()).await.unwrap();
 
         let getattr = fs.getattr(lookup.attr.ino).await.unwrap();
         assert_eq!(flexible_retrieval, getattr.attr.perm == 0);
@@ -1284,13 +1258,10 @@ async fn test_readdir_rewind_ordered() {
         client.add_object(&format!("foo{i}"), b"foo".into());
     }
 
-    let dir_handle = fs.opendir(FUSE_ROOT_INODE, 0).await.unwrap().fh;
+    let dir_handle = fs.opendir(ROOT_INODE, 0).await.unwrap().fh;
 
     let mut reply = DirectoryReply::new(5);
-    let _ = fs
-        .readdirplus(FUSE_ROOT_INODE, dir_handle, 0, &mut reply)
-        .await
-        .unwrap();
+    let _ = fs.readdirplus(ROOT_INODE, dir_handle, 0, &mut reply).await.unwrap();
     let entries = reply
         .entries
         .iter()
@@ -1300,7 +1271,7 @@ async fn test_readdir_rewind_ordered() {
 
     // Trying to read out of order should fail (only the previous or next offsets are valid)
     assert!(reply.entries.back().unwrap().offset > 1);
-    fs.readdirplus(FUSE_ROOT_INODE, dir_handle, 1, &mut Default::default())
+    fs.readdirplus(ROOT_INODE, dir_handle, 1, &mut Default::default())
         .await
         .expect_err("out of order");
 
@@ -1336,7 +1307,7 @@ async fn test_readdir_rewind_ordered() {
     let mut next_page = DirectoryReply::new(0);
     let _ = fs
         .readdirplus(
-            FUSE_ROOT_INODE,
+            ROOT_INODE,
             dir_handle,
             reply.entries.back().unwrap().offset,
             &mut next_page,
@@ -1349,7 +1320,7 @@ async fn test_readdir_rewind_ordered() {
 
     for entry in reply.entries {
         // We know we're in the root dir, so the . and .. entries will both be FUSE_ROOT_INODE
-        if entry.ino != FUSE_ROOT_INODE {
+        if entry.ino != ROOT_INODE {
             // Each inode in this list should be remembered twice since we did two `readdirplus`es.
             // Forget will panic if this makes the lookup count underflow.
             fs.forget(entry.ino, 2).await;
@@ -1369,7 +1340,7 @@ async fn test_readdir_rewind_unordered() {
         client.add_object(&format!("foo{i}"), b"foo".into());
     }
 
-    let dir_handle = fs.opendir(FUSE_ROOT_INODE, 0).await.unwrap().fh;
+    let dir_handle = fs.opendir(ROOT_INODE, 0).await.unwrap().fh;
 
     // Requesting same offset (non zero) works fine by returning last response
     let _ = ls(&fs, dir_handle, 0, 5).await;
@@ -1400,7 +1371,7 @@ async fn test_readdir_rewind_with_new_files(s3_fs_config: S3FilesystemConfig) {
         client.add_object(&format!("foo{i}"), b"foo".into());
     }
 
-    let dir_handle = fs.opendir(FUSE_ROOT_INODE, 0).await.unwrap().fh;
+    let dir_handle = fs.opendir(ROOT_INODE, 0).await.unwrap().fh;
 
     // Let's add a new local file
     let file_name = "newfile.bin";
@@ -1437,7 +1408,7 @@ async fn test_readdir_rewind_with_new_files(s3_fs_config: S3FilesystemConfig) {
 async fn test_readdir_rewind_with_local_files_only() {
     let (_, fs) = make_test_filesystem("test_readdir_rewind", &Default::default(), Default::default());
 
-    let dir_handle = fs.opendir(FUSE_ROOT_INODE, 0).await.unwrap().fh;
+    let dir_handle = fs.opendir(ROOT_INODE, 0).await.unwrap().fh;
 
     // Let's add a new local file
     let file_name = "newfile.bin";
@@ -1467,7 +1438,7 @@ async fn test_readdir_rewind_with_local_files_only() {
 
 async fn new_local_file(fs: &TestS3Filesystem<Arc<MockClient>>, filename: &str) {
     let mode = libc::S_IFREG | libc::S_IRWXU; // regular file + 0700 permissions
-    let dentry = fs.mknod(FUSE_ROOT_INODE, filename.as_ref(), mode, 0, 0).await.unwrap();
+    let dentry = fs.mknod(ROOT_INODE, filename.as_ref(), mode, 0, 0).await.unwrap();
     assert_eq!(dentry.attr.size, 0);
     let file_ino = dentry.attr.ino;
 
@@ -1491,7 +1462,7 @@ async fn ls(
 ) -> Vec<(u64, OsString)> {
     let mut reply = DirectoryReply::new(max_entries);
     let _ = fs
-        .readdirplus(FUSE_ROOT_INODE, dir_handle, offset, &mut reply)
+        .readdirplus(ROOT_INODE, dir_handle, offset, &mut reply)
         .await
         .unwrap();
     reply

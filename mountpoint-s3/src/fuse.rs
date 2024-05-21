@@ -8,7 +8,8 @@ use std::time::SystemTime;
 use time::OffsetDateTime;
 use tracing::{field, instrument, Instrument};
 
-use crate::fs::{DirectoryEntry, DirectoryReplier, InodeNo, S3Filesystem, S3FilesystemConfig, ToErrno};
+use crate::fs::{DirectoryEntry, DirectoryReplier, S3Filesystem, S3FilesystemConfig, ToErrno};
+use crate::namespace::{self, Inode, InodeNo};
 use crate::prefetch::Prefetch;
 use crate::prefix::Prefix;
 #[cfg(target_os = "macos")]
@@ -63,34 +64,38 @@ macro_rules! fuse_unsupported {
 
 /// This is just a thin wrapper around [S3Filesystem] that implements the actual `fuser` protocol,
 /// so that we can test our actual filesystem implementation without having actual FUSE in the loop.
-pub struct S3FuseFilesystem<Client, Prefetcher>
+pub struct S3FuseFilesystem<Namespace, Client, Prefetcher>
 where
+    Namespace: namespace::Namespace,
     Client: ObjectClient + Send + Sync + 'static,
     Prefetcher: Prefetch,
 {
-    fs: S3Filesystem<Client, Prefetcher>,
+    fs: S3Filesystem<Namespace, Client, Prefetcher>,
 }
 
-impl<Client, Prefetcher> S3FuseFilesystem<Client, Prefetcher>
+impl<Namespace, Client, Prefetcher> S3FuseFilesystem<Namespace, Client, Prefetcher>
 where
+    Namespace: namespace::Namespace,
     Client: ObjectClient + Send + Sync + 'static,
     Prefetcher: Prefetch,
 {
     pub fn new(
+        namespace: Namespace,
         client: Client,
         prefetcher: Prefetcher,
         bucket: &str,
         prefix: &Prefix,
         config: S3FilesystemConfig,
     ) -> Self {
-        let fs = S3Filesystem::new(client, prefetcher, bucket, prefix, config);
+        let fs = S3Filesystem::new(namespace, client, prefetcher, bucket, prefix, config);
 
         Self { fs }
     }
 }
 
-impl<Client, Prefetcher> Filesystem for S3FuseFilesystem<Client, Prefetcher>
+impl<Namespace, Client, Prefetcher> Filesystem for S3FuseFilesystem<Namespace, Client, Prefetcher>
 where
+    Namespace: namespace::Namespace,
     Client: ObjectClient + Send + Sync + 'static,
     Prefetcher: Prefetch,
 {
@@ -169,8 +174,8 @@ where
             count: &'a mut usize,
         }
 
-        impl<'a> DirectoryReplier for ReplyDirectory<'a> {
-            fn add(&mut self, entry: DirectoryEntry) -> bool {
+        impl<'a, I: Inode> DirectoryReplier<I> for ReplyDirectory<'a> {
+            fn add(&mut self, entry: DirectoryEntry<I>) -> bool {
                 let result = self.inner.add(entry.ino, entry.offset, entry.attr.kind, entry.name);
                 if !result {
                     *self.count += 1;
@@ -208,8 +213,8 @@ where
             count: &'a mut usize,
         }
 
-        impl<'a> DirectoryReplier for ReplyDirectoryPlus<'a> {
-            fn add(&mut self, entry: DirectoryEntry) -> bool {
+        impl<'a, I: Inode> DirectoryReplier<I> for ReplyDirectoryPlus<'a> {
+            fn add(&mut self, entry: DirectoryEntry<I>) -> bool {
                 let result = self.inner.add(
                     entry.ino,
                     entry.offset,

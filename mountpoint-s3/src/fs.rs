@@ -17,18 +17,14 @@ use mountpoint_s3_client::error::{GetObjectError, ObjectClientError};
 use mountpoint_s3_client::types::ETag;
 use mountpoint_s3_client::ObjectClient;
 
-use crate::inode::{
-    Inode, InodeError, InodeKind, LookedUp, ReadHandle, ReaddirHandle, Superblock, SuperblockConfig, WriteHandle,
-};
-use crate::logging;
+use crate::namespace::{Inode, InodeError, InodeKind, InodeNo, LookedUp, ReadHandle, ReaddirHandle};
 use crate::prefetch::{Prefetch, PrefetchReadError, PrefetchResult};
 use crate::prefix::Prefix;
 use crate::s3::S3Personality;
 use crate::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use crate::sync::{Arc, AsyncMutex, AsyncRwLock};
 use crate::upload::{UploadRequest, Uploader};
-
-pub use crate::inode::InodeNo;
+use crate::{logging, namespace};
 
 #[macro_use]
 mod error;
@@ -37,18 +33,16 @@ pub use error::{Error, ToErrno};
 mod time_to_live;
 pub use time_to_live::TimeToLive;
 
-pub const FUSE_ROOT_INODE: InodeNo = 1u64;
-
 #[derive(Debug)]
-struct DirHandle {
+struct DirHandle<Namespace: namespace::Namespace> {
     #[allow(unused)]
     ino: InodeNo,
-    handle: AsyncMutex<ReaddirHandle>,
+    handle: AsyncMutex<Namespace::ReaddirHandle>,
     offset: AtomicI64,
-    last_response: AsyncMutex<Option<(i64, Vec<DirectoryEntry>)>>,
+    last_response: AsyncMutex<Option<(i64, Vec<DirectoryEntry<Namespace::Inode>>)>>,
 }
 
-impl DirHandle {
+impl<Namespace: namespace::Namespace> DirHandle<Namespace> {
     fn offset(&self) -> i64 {
         self.offset.load(Ordering::SeqCst)
     }
@@ -63,60 +57,61 @@ impl DirHandle {
 }
 
 #[derive(Debug)]
-struct FileHandle<Client, Prefetcher>
+struct FileHandle<Namespace, Client, Prefetcher>
 where
+    Namespace: namespace::Namespace,
     Client: ObjectClient + Send + Sync + 'static,
     Prefetcher: Prefetch,
 {
-    inode: Inode,
+    inode: Namespace::Inode,
     full_key: String,
-    state: AsyncMutex<FileHandleState<Client, Prefetcher>>,
+    state: AsyncMutex<FileHandleState<Namespace, Client, Prefetcher>>,
 }
 
-enum FileHandleState<Client, Prefetcher>
+enum FileHandleState<Namespace, Client, Prefetcher>
 where
+    Namespace: namespace::Namespace,
     Client: ObjectClient + Send + Sync + 'static,
     Prefetcher: Prefetch,
 {
     /// The file handle has been assigned as a read handle
     Read {
-        handle: ReadHandle,
+        handle: Namespace::ReadHandle,
         request: Prefetcher::PrefetchResult<Client>,
     },
     /// The file handle has been assigned as a write handle
-    Write(UploadState<Client>),
+    Write(UploadState<Namespace::WriteHandle, Client>),
 }
 
-impl<Client, Prefetcher> std::fmt::Debug for FileHandleState<Client, Prefetcher>
+impl<Namespace, Client, Prefetcher> std::fmt::Debug for FileHandleState<Namespace, Client, Prefetcher>
 where
+    Namespace: namespace::Namespace,
     Client: ObjectClient + Send + Sync + 'static + std::fmt::Debug,
     Prefetcher: Prefetch,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FileHandleState::Read { handle, .. } => f.debug_struct("Read").field("handle", handle).finish(),
-            FileHandleState::Write(arg0) => f.debug_tuple("Write").field(arg0).finish(),
+            FileHandleState::Read { .. } => f.debug_struct("Read").finish(),
+            FileHandleState::Write(_) => f.debug_tuple("Write").finish(),
         }
     }
 }
 
-impl<Client, Prefetcher> FileHandleState<Client, Prefetcher>
+impl<Namespace, Client, Prefetcher> FileHandleState<Namespace, Client, Prefetcher>
 where
+    Namespace: namespace::Namespace,
     Client: ObjectClient + Send + Sync,
     Prefetcher: Prefetch,
 {
     async fn new_write_handle(
-        lookup: &LookedUp,
+        lookup: &LookedUp<Namespace::Inode>,
         ino: InodeNo,
         flags: i32,
         pid: u32,
-        fs: &S3Filesystem<Client, Prefetcher>,
-    ) -> Result<FileHandleState<Client, Prefetcher>, Error> {
+        fs: &S3Filesystem<Namespace, Client, Prefetcher>,
+    ) -> Result<FileHandleState<Namespace, Client, Prefetcher>, Error> {
         let is_truncate = flags & libc::O_TRUNC != 0;
-        let handle = fs
-            .superblock
-            .write(&fs.client, ino, fs.config.allow_overwrite, is_truncate)
-            .await?;
+        let handle = fs.namespace.write(ino, fs.config.allow_overwrite, is_truncate).await?;
         let key = lookup.inode.full_key();
         let handle = match fs.uploader.put(&fs.bucket, key).await {
             Err(e) => {
@@ -133,16 +128,16 @@ where
     }
 
     async fn new_read_handle(
-        lookup: &LookedUp,
-        fs: &S3Filesystem<Client, Prefetcher>,
-    ) -> Result<FileHandleState<Client, Prefetcher>, Error> {
+        lookup: &LookedUp<Namespace::Inode>,
+        fs: &S3Filesystem<Namespace, Client, Prefetcher>,
+    ) -> Result<FileHandleState<Namespace, Client, Prefetcher>, Error> {
         if !lookup.stat.is_readable {
             return Err(err!(
                 libc::EACCES,
                 "objects in flexible retrieval storage classes are not accessible",
             ));
         }
-        let handle = fs.superblock.read(&fs.client, lookup.inode.ino()).await?;
+        let handle = fs.namespace.read(lookup.inode.ino()).await?;
         let full_key = lookup.inode.full_key().to_owned();
         let object_size = lookup.stat.size as u64;
         let etag = match &lookup.stat.etag {
@@ -159,7 +154,7 @@ where
 }
 
 #[derive(Debug)]
-enum UploadState<Client: ObjectClient> {
+enum UploadState<WriteHandle: namespace::WriteHandle, Client: ObjectClient> {
     InProgress {
         request: UploadRequest<Client>,
         handle: WriteHandle,
@@ -171,7 +166,7 @@ enum UploadState<Client: ObjectClient> {
     Failed(libc::c_int),
 }
 
-impl<Client: ObjectClient> UploadState<Client> {
+impl<WriteHandle: namespace::WriteHandle, Client: ObjectClient> UploadState<WriteHandle, Client> {
     async fn write(&mut self, offset: i64, data: &[u8], key: &str) -> Result<u32, Error> {
         let (upload, handle) = match self {
             Self::InProgress { request, handle, .. } => (request, handle),
@@ -516,31 +511,34 @@ pub enum SseCorruptedError {
     KeyMismatch(String, Option<String>),
 }
 
-#[derive(Debug)]
-pub struct S3Filesystem<Client, Prefetcher>
+// #[derive(Debug)]
+pub struct S3Filesystem<Namespace, Client, Prefetcher>
 where
+    Namespace: namespace::Namespace,
     Client: ObjectClient + Send + Sync + 'static,
     Prefetcher: Prefetch,
 {
     config: S3FilesystemConfig,
     client: Arc<Client>,
-    superblock: Superblock,
+    namespace: Namespace,
     prefetcher: Prefetcher,
     uploader: Uploader<Client>,
     bucket: String,
     #[allow(unused)]
     prefix: Prefix,
     next_handle: AtomicU64,
-    dir_handles: AsyncRwLock<HashMap<u64, Arc<DirHandle>>>,
-    file_handles: AsyncRwLock<HashMap<u64, Arc<FileHandle<Client, Prefetcher>>>>,
+    dir_handles: AsyncRwLock<HashMap<u64, Arc<DirHandle<Namespace>>>>,
+    file_handles: AsyncRwLock<HashMap<u64, Arc<FileHandle<Namespace, Client, Prefetcher>>>>,
 }
 
-impl<Client, Prefetcher> S3Filesystem<Client, Prefetcher>
+impl<Namespace, Client, Prefetcher> S3Filesystem<Namespace, Client, Prefetcher>
 where
+    Namespace: namespace::Namespace,
     Client: ObjectClient + Send + Sync + 'static,
     Prefetcher: Prefetch,
 {
     pub fn new(
+        namespace: Namespace,
         client: Client,
         prefetcher: Prefetcher,
         bucket: &str,
@@ -548,12 +546,6 @@ where
         config: S3FilesystemConfig,
     ) -> Self {
         trace!(?bucket, ?prefix, ?config, "new filesystem");
-
-        let superblock_config = SuperblockConfig {
-            cache_config: config.cache_config.clone(),
-            s3_personality: config.s3_personality,
-        };
-        let superblock = Superblock::new(bucket, prefix, superblock_config);
 
         let client = Arc::new(client);
 
@@ -567,7 +559,7 @@ where
         Self {
             config,
             client,
-            superblock,
+            namespace,
             prefetcher,
             uploader,
             bucket: bucket.to_string(),
@@ -606,25 +598,26 @@ pub struct Opened {
 }
 
 /// Reply to a `readdir` or `readdirplus` call
-pub trait DirectoryReplier {
+pub trait DirectoryReplier<I: namespace::Inode> {
     /// Add a new dentry to the reply. Returns true if the buffer was full and so the entry was not
     /// added.
-    fn add(&mut self, entry: DirectoryEntry) -> bool;
+    fn add(&mut self, entry: DirectoryEntry<I>) -> bool;
 }
 
 #[derive(Debug, Clone)]
-pub struct DirectoryEntry {
+pub struct DirectoryEntry<I: namespace::Inode> {
     pub ino: u64,
     pub offset: i64,
     pub name: OsString,
     pub attr: FileAttr,
     pub generation: u64,
     pub ttl: Duration,
-    lookup: LookedUp,
+    lookup: LookedUp<I>,
 }
 
-impl<Client, Prefetcher> S3Filesystem<Client, Prefetcher>
+impl<Namespace, Client, Prefetcher> S3Filesystem<Namespace, Client, Prefetcher>
 where
+    Namespace: namespace::Namespace,
     Client: ObjectClient + Send + Sync + 'static,
     Prefetcher: Prefetch,
 {
@@ -643,7 +636,7 @@ where
         Ok(())
     }
 
-    fn make_attr(&self, lookup: &LookedUp) -> FileAttr {
+    fn make_attr(&self, lookup: &LookedUp<impl namespace::Inode>) -> FileAttr {
         /// From man stat(2): `st_blocks`: "This field indicates the number of blocks allocated to
         /// the file, in 512-byte units."
         const STAT_BLOCK_SIZE: u64 = 512;
@@ -687,17 +680,13 @@ where
     pub async fn lookup(&self, parent: InodeNo, name: &OsStr) -> Result<Entry, Error> {
         trace!("fs:lookup with parent {:?} name {:?}", parent, name);
 
-        let lookup = self
-            .superblock
-            .lookup(&self.client, parent, name)
-            .await
-            .map_err(|err| match err {
-                InodeError::FileDoesNotExist(_, _) => {
-                    // Lookup returning ENOENT is common case, and we dont want to warn in case `FileDoesNotExist` within ENOENT
-                    err!(libc::ENOENT, source: err, Level::DEBUG, "file does not exist")
-                }
-                _ => err.into(),
-            })?;
+        let lookup = self.namespace.lookup(parent, name).await.map_err(|err| match err {
+            InodeError::FileDoesNotExist(_, _) => {
+                // Lookup returning ENOENT is common case, and we dont want to warn in case `FileDoesNotExist` within ENOENT
+                err!(libc::ENOENT, source: err, Level::DEBUG, "file does not exist")
+            }
+            _ => err.into(),
+        })?;
         let attr = self.make_attr(&lookup);
         Ok(Entry {
             ttl: lookup.validity(),
@@ -709,7 +698,7 @@ where
     pub async fn getattr(&self, ino: InodeNo) -> Result<Attr, Error> {
         trace!("fs:getattr with ino {:?}", ino);
 
-        let lookup = self.superblock.getattr(&self.client, ino, false).await?;
+        let lookup = self.namespace.getattr(ino, false).await?;
         let attr = self.make_attr(&lookup);
 
         Ok(Attr {
@@ -734,7 +723,7 @@ where
             mtime,
             size
         );
-        let setattr_result = self.superblock.setattr(&self.client, ino, atime, mtime).await;
+        let setattr_result = self.namespace.setattr(ino, atime, mtime).await;
         let lookup = match (setattr_result, size) {
             (Ok(lookup), _) => lookup,
             (Err(InodeError::SetAttrNotPermittedOnRemoteInode(_)), Some(0)) if !self.config.allow_overwrite => {
@@ -756,7 +745,7 @@ where
 
     pub async fn forget(&self, ino: InodeNo, n: u64) {
         trace!("fs:forget with ino {:?} n {:?}", ino, n);
-        self.superblock.forget(ino, n);
+        let _ = self.namespace.forget(ino, n).await;
     }
 
     pub async fn open(&self, ino: InodeNo, flags: i32, pid: u32) -> Result<Opened, Error> {
@@ -768,16 +757,16 @@ where
         let direct_io = flags & libc::O_DIRECT != 0;
 
         let force_revalidate = !self.config.cache_config.serve_lookup_from_cache || direct_io;
-        let lookup = self.superblock.getattr(&self.client, ino, force_revalidate).await?;
+        let lookup = self.namespace.getattr(ino, force_revalidate).await?;
 
         match lookup.inode.kind() {
-            InodeKind::Directory => return Err(InodeError::IsDirectory(lookup.inode.err()).into()),
+            InodeKind::Directory => return Err(InodeError::IsDirectory(lookup.inode.description()).into()),
             InodeKind::File => (),
         }
 
         let inode = lookup.inode.clone();
         let full_key = lookup.inode.full_key().to_owned();
-        let remote_file = lookup.inode.is_remote()?;
+        let remote_file = lookup.inode.is_remote();
 
         // Open with O_APPEND is ok for new files because it's same as creating a new one.
         // but we can't support it on existing files and we should explicitly say we don't allow that.
@@ -886,10 +875,7 @@ where
             ));
         }
 
-        let lookup = self
-            .superblock
-            .create(&self.client, parent, name, InodeKind::File)
-            .await?;
+        let lookup = self.namespace.create(parent, name, InodeKind::File).await?;
         let attr = self.make_attr(&lookup);
         Ok(Entry {
             ttl: lookup.validity(),
@@ -899,10 +885,7 @@ where
     }
 
     pub async fn mkdir(&self, parent: InodeNo, name: &OsStr, _mode: libc::mode_t, _umask: u32) -> Result<Entry, Error> {
-        let lookup = self
-            .superblock
-            .create(&self.client, parent, name, InodeKind::Directory)
-            .await?;
+        let lookup = self.namespace.create(parent, name, InodeKind::Directory).await?;
         let attr = self.make_attr(&lookup);
         Ok(Entry {
             ttl: lookup.validity(),
@@ -953,8 +936,8 @@ where
     }
 
     /// Creates a new ReaddirHandle for the provided parent and default page size
-    async fn readdir_handle(&self, parent: InodeNo) -> Result<ReaddirHandle, InodeError> {
-        self.superblock.readdir(&self.client, parent, 1000).await
+    async fn readdir_handle(&self, parent: InodeNo) -> Result<Namespace::ReaddirHandle, InodeError> {
+        self.namespace.readdir(parent, 1000).await
     }
 
     pub async fn opendir(&self, parent: InodeNo, _flags: i32) -> Result<Opened, Error> {
@@ -976,7 +959,7 @@ where
         Ok(Opened { fh, flags: 0 })
     }
 
-    pub async fn readdir<R: DirectoryReplier>(
+    pub async fn readdir<R: DirectoryReplier<Namespace::Inode>>(
         &self,
         parent: InodeNo,
         fh: u64,
@@ -987,7 +970,7 @@ where
         self.readdir_impl(parent, fh, offset, false, reply).await
     }
 
-    pub async fn readdirplus<R: DirectoryReplier>(
+    pub async fn readdirplus<R: DirectoryReplier<Namespace::Inode>>(
         &self,
         parent: InodeNo,
         fh: u64,
@@ -998,7 +981,7 @@ where
         self.readdir_impl(parent, fh, offset, true, reply).await
     }
 
-    async fn readdir_impl<R: DirectoryReplier>(
+    async fn readdir_impl<R: DirectoryReplier<Namespace::Inode>>(
         &self,
         parent: InodeNo,
         fh: u64,
@@ -1059,20 +1042,20 @@ where
 
         /// Wrap a replier to duplicate the entries and store them in `dir_handle.last_response` so
         /// we can re-use them if the directory handle rewinds
-        struct Reply<R: DirectoryReplier> {
+        struct Reply<N: namespace::Namespace, R: DirectoryReplier<N::Inode>> {
             reply: R,
-            entries: Vec<DirectoryEntry>,
+            entries: Vec<DirectoryEntry<N::Inode>>,
         }
 
-        impl<R: DirectoryReplier> Reply<R> {
-            async fn finish(self, offset: i64, dir_handle: &DirHandle) -> R {
+        impl<N: namespace::Namespace, R: DirectoryReplier<N::Inode>> Reply<N, R> {
+            async fn finish(self, offset: i64, dir_handle: &DirHandle<N>) -> R {
                 *dir_handle.last_response.lock().await = Some((offset, self.entries));
                 self.reply
             }
         }
 
-        impl<R: DirectoryReplier> DirectoryReplier for Reply<R> {
-            fn add(&mut self, entry: DirectoryEntry) -> bool {
+        impl<N: namespace::Namespace, R: DirectoryReplier<N::Inode>> DirectoryReplier<N::Inode> for Reply<N, R> {
+            fn add(&mut self, entry: DirectoryEntry<N::Inode>) -> bool {
                 let result = self.reply.add(entry.clone());
                 if !result {
                     self.entries.push(entry);
@@ -1084,7 +1067,7 @@ where
         let mut reply = Reply { reply, entries: vec![] };
 
         if dir_handle.offset() < 1 {
-            let lookup = self.superblock.getattr(&self.client, parent, false).await?;
+            let lookup = self.namespace.getattr(parent, false).await?;
             let attr = self.make_attr(&lookup);
             let entry = DirectoryEntry {
                 ino: parent,
@@ -1101,10 +1084,7 @@ where
             dir_handle.next_offset();
         }
         if dir_handle.offset() < 2 {
-            let lookup = self
-                .superblock
-                .getattr(&self.client, readdir_handle.parent(), false)
-                .await?;
+            let lookup = self.namespace.getattr(readdir_handle.parent(), false).await?;
             let attr = self.make_attr(&lookup);
             let entry = DirectoryEntry {
                 ino: readdir_handle.parent(),
@@ -1122,7 +1102,7 @@ where
         }
 
         loop {
-            let next = match readdir_handle.next(&self.client).await? {
+            let next = match readdir_handle.next().await? {
                 None => return Ok(reply.finish(offset, &dir_handle).await),
                 Some(next) => next,
             };
@@ -1151,7 +1131,7 @@ where
 
     async fn complete_upload(
         &self,
-        request: &mut UploadState<Client>,
+        request: &mut UploadState<Namespace::WriteHandle, Client>,
         full_key: &str,
         ignore_if_empty: bool,
         pid: Option<u32>,
@@ -1259,7 +1239,7 @@ where
     }
 
     pub async fn rmdir(&self, parent_ino: InodeNo, name: &OsStr) -> Result<(), Error> {
-        self.superblock.rmdir(&self.client, parent_ino, name).await?;
+        self.namespace.rmdir(parent_ino, name).await?;
         Ok(())
     }
 
@@ -1278,13 +1258,15 @@ where
                 "Deletes are disabled. Use '--allow-delete' mount option to enable it."
             ));
         }
-        Ok(self.superblock.unlink(&self.client, parent_ino, name).await?)
+        Ok(self.namespace.unlink(parent_ino, name).await?)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::namespace::bucket::{Superblock, SuperblockConfig};
+    use crate::namespace::ROOT_INODE;
     use crate::prefetch::default_prefetch;
     use fuser::FileType;
     use futures::executor::ThreadPool;
@@ -1369,10 +1351,15 @@ mod tests {
             server_side_encryption,
             ..Default::default()
         };
-        let mut fs = S3Filesystem::new(client, prefetcher, bucket, &Default::default(), fs_config);
+        let superblock_config = SuperblockConfig {
+            cache_config: fs_config.cache_config.clone(),
+            s3_personality: fs_config.s3_personality,
+        };
+        let ns = Superblock::new(bucket, &Default::default(), client.clone(), superblock_config);
+        let mut fs = S3Filesystem::new(ns, client, prefetcher, bucket, &Default::default(), fs_config);
 
         // Lookup inode of the dir1 directory
-        let entry = fs.lookup(FUSE_ROOT_INODE, "dir1".as_ref()).await.unwrap();
+        let entry = fs.lookup(ROOT_INODE, "dir1".as_ref()).await.unwrap();
         assert_eq!(entry.attr.kind, FileType::Directory);
         let dir_ino = entry.attr.ino;
 

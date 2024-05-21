@@ -38,28 +38,33 @@
 use std::cmp::Ordering;
 use std::collections::VecDeque;
 
+use async_trait::async_trait;
 use mountpoint_s3_client::types::ObjectInfo;
 use mountpoint_s3_client::ObjectClient;
 use tracing::{error, trace, warn};
 
+use crate::namespace::{self, Inode as _, LookedUp};
 use crate::sync::{Arc, AsyncMutex, Mutex};
 
 use super::{
-    valid_inode_name, InodeError, InodeKind, InodeKindData, InodeNo, InodeStat, LookedUp, RemoteLookup, SuperblockInner,
+    stat_for_directory, stat_for_file, valid_inode_name, Inode, InodeError, InodeKind, InodeKindData, InodeNo,
+    RemoteLookup, SuperblockInner,
 };
 
 /// Handle for an inflight directory listing
 #[derive(Debug)]
-pub struct ReaddirHandle {
+pub struct ReaddirHandle<Client> {
+    client: Client,
     inner: Arc<SuperblockInner>,
     dir_ino: InodeNo,
     parent_ino: InodeNo,
     iter: AsyncMutex<ReaddirIter>,
-    readded: Mutex<Option<LookedUp>>,
+    readded: Mutex<Option<LookedUp<Inode>>>,
 }
 
-impl ReaddirHandle {
+impl<Client: ObjectClient> ReaddirHandle<Client> {
     pub(super) fn new(
+        client: Client,
         inner: Arc<SuperblockInner>,
         dir_ino: InodeNo,
         parent_ino: InodeNo,
@@ -70,7 +75,7 @@ impl ReaddirHandle {
             let inode = inner.get(dir_ino)?;
             let kind_data = &inode.get_inode_state()?.kind_data;
             let local_files = match kind_data {
-                InodeKindData::File { .. } => return Err(InodeError::NotADirectory(inode.err())),
+                InodeKindData::File { .. } => return Err(InodeError::NotADirectory(inode.description())),
                 InodeKindData::Directory { writing_children, .. } => writing_children.iter().map(|ino| {
                     let inode = inner.get(*ino)?;
                     let stat = inode.get_inode_state()?.stat.clone();
@@ -99,6 +104,7 @@ impl ReaddirHandle {
         };
 
         Ok(Self {
+            client,
             inner,
             dir_ino,
             parent_ino,
@@ -110,7 +116,7 @@ impl ReaddirHandle {
     /// Return the next inode for the directory stream. If the stream is finished, returns
     /// `Ok(None)`. Does not increment the lookup count of the returned inodes: the caller
     /// is responsible for calling [`remember()`] if required.
-    pub async fn next<OC: ObjectClient>(&self, client: &OC) -> Result<Option<LookedUp>, InodeError> {
+    async fn next(&self) -> Result<Option<LookedUp<Inode>>, InodeError> {
         if let Some(readded) = self.readded.lock().unwrap().take() {
             return Ok(Some(readded));
         }
@@ -120,7 +126,7 @@ impl ReaddirHandle {
         loop {
             let next = {
                 let mut iter = self.iter.lock().await;
-                iter.next(client).await?
+                iter.next(&self.client).await?
             };
 
             if let Some(next) = next {
@@ -138,38 +144,38 @@ impl ReaddirHandle {
     }
 
     /// Re-add an entry to the front of the queue if the consumer wasn't able to use it
-    pub fn readd(&self, entry: LookedUp) {
+    fn readd(&self, entry: LookedUp<Inode>) {
         let old = self.readded.lock().unwrap().replace(entry);
         assert!(old.is_none(), "cannot readd more than one entry");
     }
 
     /// Increase the lookup count of the looked up inode and
     /// ensure it is registered with the superblock.
-    pub fn remember(&self, entry: &LookedUp) {
+    fn remember(&self, entry: &LookedUp<Inode>) {
         self.inner.remember(&entry.inode);
     }
 
     /// Return the inode number of the parent directory of this directory handle
-    pub fn parent(&self) -> InodeNo {
+    fn parent(&self) -> InodeNo {
         self.parent_ino
     }
 
     /// Create or update an inode for the given ReaddirEntry.
-    fn instantiate_remote_inode(&self, entry: ReaddirEntry) -> Result<LookedUp, InodeError> {
+    fn instantiate_remote_inode(&self, entry: ReaddirEntry) -> Result<LookedUp<Inode>, InodeError> {
         let remote_lookup = match &entry {
             // If we made it this far with a local inode, we know there's nothing on the remote with
             // the same name, because [LocalInode] is last in the ordering and so otherwise would
             // have been deduplicated by now.
             ReaddirEntry::LocalInode { .. } => None,
             ReaddirEntry::RemotePrefix { .. } => {
-                let stat = InodeStat::for_directory(self.inner.mount_time, self.inner.config.cache_config.dir_ttl);
+                let stat = stat_for_directory(self.inner.mount_time, self.inner.config.cache_config.dir_ttl);
                 Some(RemoteLookup {
                     stat,
                     kind: InodeKind::Directory,
                 })
             }
             ReaddirEntry::RemoteObject { object_info, .. } => {
-                let stat = InodeStat::for_file(
+                let stat = stat_for_file(
                     object_info.size as usize,
                     object_info.last_modified,
                     Some(object_info.etag.clone()),
@@ -187,12 +193,31 @@ impl ReaddirHandle {
     }
 
     #[cfg(test)]
-    pub(super) async fn collect<OC: ObjectClient>(&self, client: &OC) -> Result<Vec<LookedUp>, InodeError> {
+    pub(super) async fn collect(&self) -> Result<Vec<LookedUp<Inode>>, InodeError> {
         let mut result = vec![];
-        while let Some(entry) = self.next(client).await? {
+        while let Some(entry) = self.next().await? {
             result.push(entry);
         }
         Ok(result)
+    }
+}
+
+#[async_trait]
+impl<Client: ObjectClient + Send + Sync + 'static> namespace::ReaddirHandle<Inode> for ReaddirHandle<Client> {
+    async fn next(&self) -> Result<Option<LookedUp<Inode>>, InodeError> {
+        self.next().await
+    }
+
+    fn readd(&self, entry: LookedUp<Inode>) {
+        self.readd(entry)
+    }
+
+    fn remember(&self, entry: &LookedUp<Inode>) {
+        self.remember(entry)
+    }
+
+    fn parent(&self) -> InodeNo {
+        self.parent()
     }
 }
 
@@ -202,7 +227,7 @@ impl ReaddirHandle {
 enum ReaddirEntry {
     RemotePrefix { name: String },
     RemoteObject { name: String, object_info: ObjectInfo },
-    LocalInode { lookup: LookedUp },
+    LocalInode { lookup: LookedUp<Inode> },
 }
 
 // This looks a little silly but makes the [Ord] implementation for [ReaddirEntry] a bunch clearer

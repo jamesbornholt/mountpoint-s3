@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use fuser::FileType;
 use futures::future::{BoxFuture, FutureExt};
-use mountpoint_s3::fs::{CacheConfig, InodeNo, ToErrno, FUSE_ROOT_INODE};
+use mountpoint_s3::fs::{CacheConfig, ToErrno};
+use mountpoint_s3::namespace::{InodeNo, ROOT_INODE};
 use mountpoint_s3::prefix::Prefix;
 use mountpoint_s3::S3FilesystemConfig;
 use mountpoint_s3_client::mock_client::{MockClient, MockObject};
@@ -159,7 +160,7 @@ impl InflightWrites {
     }
 }
 
-#[derive(Debug)]
+// #[derive(Debug)]
 pub struct Harness {
     readdir_limit: usize, // max number of entries that a readdir will return; 0 means no limit
     reference: Reference,
@@ -242,8 +243,7 @@ impl Harness {
     /// Walk the filesystem tree and check that at each level, contents match the reference
     pub async fn compare_contents(&self) {
         let root = self.reference.root();
-        self.compare_contents_recursive(FUSE_ROOT_INODE, FUSE_ROOT_INODE, root)
-            .await;
+        self.compare_contents_recursive(ROOT_INODE, ROOT_INODE, root).await;
     }
 
     /// Walk a single path through the filesystem tree and ensure each node matches the reference.
@@ -256,8 +256,8 @@ impl Harness {
         }
         let (path, node) = &inodes[idx % inodes.len()];
 
-        let mut parent = FUSE_ROOT_INODE;
-        let mut seen_inos = HashSet::from([FUSE_ROOT_INODE]);
+        let mut parent = ROOT_INODE;
+        let mut seen_inos = HashSet::from([ROOT_INODE]);
         for name in path.iter().take(path.len().saturating_sub(1)) {
             let lookup = self.fs.lookup(parent, name.as_ref()).await.unwrap();
             assert_eq!(lookup.attr.kind, FileType::Directory);
@@ -285,7 +285,7 @@ impl Harness {
     async fn lookup(&self, path: &Path) -> Result<InodeNo, libc::c_int> {
         let mut components = path.components();
         assert_eq!(components.next(), Some(Component::RootDir));
-        let mut inode = FUSE_ROOT_INODE;
+        let mut inode = ROOT_INODE;
         for component in components {
             if let Component::Normal(folder) = component {
                 inode = self.fs.lookup(inode, folder).await.map_err(|e| e.to_errno())?.attr.ino;

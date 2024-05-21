@@ -1,11 +1,13 @@
 use clap::{Arg, ArgAction, Command};
 use fuser::{BackgroundSession, MountOption, Session};
 use mountpoint_s3::fuse::S3FuseFilesystem;
+use mountpoint_s3::namespace::bucket::{Superblock, SuperblockConfig};
 use mountpoint_s3::prefetch::default_prefetch;
 use mountpoint_s3::S3FilesystemConfig;
 use mountpoint_s3_client::config::{EndpointConfig, S3ClientConfig};
 use mountpoint_s3_client::S3CrtClient;
 use mountpoint_s3_crt::common::rust_log_adapter::RustLogAdapter;
+use std::sync::Arc;
 use std::{
     fs::{File, OpenOptions},
     io::{self, BufRead, BufReader},
@@ -151,7 +153,7 @@ fn mount_file_system(bucket_name: &str, region: &str, throughput_target_gbps: Op
     if let Some(throughput_target_gbps) = throughput_target_gbps {
         config = config.throughput_target_gbps(throughput_target_gbps);
     }
-    let client = S3CrtClient::new(config).expect("Failed to create S3 client");
+    let client = Arc::new(S3CrtClient::new(config).expect("Failed to create S3 client"));
     let runtime = client.event_loop_group();
 
     let mut options = vec![MountOption::RO, MountOption::FSName("mountpoint-s3".to_string())];
@@ -165,8 +167,20 @@ fn mount_file_system(bucket_name: &str, region: &str, throughput_target_gbps: Op
         mountpoint.to_str().unwrap()
     );
     let prefetcher = default_prefetch(runtime, Default::default());
+    let superblock_config = SuperblockConfig {
+        cache_config: filesystem_config.cache_config.clone(),
+        s3_personality: filesystem_config.s3_personality,
+    };
+    let ns = Superblock::new(bucket_name, &Default::default(), client.clone(), superblock_config);
     let session = Session::new(
-        S3FuseFilesystem::new(client, prefetcher, bucket_name, &Default::default(), filesystem_config),
+        S3FuseFilesystem::new(
+            ns,
+            client,
+            prefetcher,
+            bucket_name,
+            &Default::default(),
+            filesystem_config,
+        ),
         mountpoint,
         &options,
     )

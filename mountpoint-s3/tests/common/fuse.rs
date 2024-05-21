@@ -6,6 +6,7 @@ use std::sync::Arc;
 use fuser::{BackgroundSession, MountOption, Session};
 use mountpoint_s3::data_cache::DataCache;
 use mountpoint_s3::fuse::S3FuseFilesystem;
+use mountpoint_s3::namespace::bucket::{Superblock, SuperblockConfig};
 use mountpoint_s3::prefetch::{Prefetch, PrefetcherConfig};
 use mountpoint_s3::prefix::Prefix;
 use mountpoint_s3::S3FilesystemConfig;
@@ -89,7 +90,7 @@ fn create_fuse_session<Client, Prefetcher>(
     filesystem_config: S3FilesystemConfig,
 ) -> BackgroundSession
 where
-    Client: ObjectClient + Send + Sync + 'static,
+    Client: ObjectClient + Send + Sync + Clone + 'static,
     Prefetcher: Prefetch + Send + Sync + 'static,
 {
     let options = vec![
@@ -100,8 +101,13 @@ where
     ];
 
     let prefix = Prefix::new(prefix).expect("valid prefix");
+    let superblock_config = SuperblockConfig {
+        cache_config: filesystem_config.cache_config.clone(),
+        s3_personality: filesystem_config.s3_personality,
+    };
+    let ns = Superblock::new(bucket, &prefix, client.clone(), superblock_config);
     let session = Session::new(
-        S3FuseFilesystem::new(client, prefetcher, bucket, &prefix, filesystem_config),
+        S3FuseFilesystem::new(ns, client, prefetcher, bucket, &prefix, filesystem_config),
         mount_dir,
         &options,
     )
