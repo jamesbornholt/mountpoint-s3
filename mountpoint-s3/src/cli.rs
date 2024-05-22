@@ -31,6 +31,7 @@ use crate::fs::{CacheConfig, S3FilesystemConfig, ServerSideEncryption, TimeToLiv
 use crate::fuse::session::FuseSession;
 use crate::fuse::S3FuseFilesystem;
 use crate::logging::{init_logging, LoggingConfig};
+use crate::namespace;
 use crate::namespace::bucket::{Superblock, SuperblockConfig};
 use crate::prefetch::{caching_prefetch, default_prefetch, Prefetch};
 use crate::prefix::Prefix;
@@ -418,10 +419,15 @@ impl CliArgs {
     }
 }
 
-pub fn main<ClientBuilder, Client, Runtime>(client_builder: ClientBuilder) -> anyhow::Result<()>
+pub fn main<ClientBuilder, Client, NamespaceBuilder, Namespace, Runtime>(
+    client_builder: ClientBuilder,
+    namespace_builder: NamespaceBuilder,
+) -> anyhow::Result<()>
 where
     ClientBuilder: FnOnce(&CliArgs) -> anyhow::Result<(Client, Runtime, S3Personality)>,
     Client: ObjectClient + Send + Sync + Clone + 'static,
+    NamespaceBuilder: FnOnce(&CliArgs, Client, S3Personality) -> anyhow::Result<Namespace>,
+    Namespace: namespace::Namespace + Send + Sync + 'static,
     Runtime: Spawn + Send + Sync + 'static,
 {
     let args = CliArgs::parse();
@@ -437,7 +443,7 @@ where
         let _metrics = metrics::install();
 
         // mount file system as a foreground process
-        let session = mount(args, client_builder)?;
+        let session = mount(args, client_builder, namespace_builder)?;
 
         println!("{successful_mount_msg}");
 
@@ -463,7 +469,7 @@ where
 
                 let _metrics = metrics::install();
 
-                let session = mount(args, client_builder);
+                let session = mount(args, client_builder, namespace_builder);
 
                 // close unused file descriptor, we only write from this end.
                 nix::unistd::close(read_fd).context("Failed to close unused file descriptor")?;
@@ -635,10 +641,34 @@ pub fn create_s3_client(args: &CliArgs) -> anyhow::Result<(S3CrtClient, EventLoo
     Ok((client, runtime, s3_personality))
 }
 
-fn mount<ClientBuilder, Client, Runtime>(args: CliArgs, client_builder: ClientBuilder) -> anyhow::Result<FuseSession>
+/// Create a real bucket namespace
+pub fn create_bucket_namespace<Client>(
+    args: &CliArgs,
+    client: Client,
+    s3_personality: S3Personality,
+) -> anyhow::Result<Superblock<Client>>
+where
+    Client: ObjectClient + Clone,
+{
+    let superblock_config = SuperblockConfig {
+        cache_config: CacheConfig::default(), // TODO
+        s3_personality,
+    };
+    let prefix = args.prefix.as_ref().cloned().unwrap_or_default();
+    let namespace = Superblock::new(&args.bucket_name, &prefix, client, superblock_config);
+    Ok(namespace)
+}
+
+fn mount<ClientBuilder, Client, NamespaceBuilder, Namespace, Runtime>(
+    args: CliArgs,
+    client_builder: ClientBuilder,
+    namespace_builder: NamespaceBuilder,
+) -> anyhow::Result<FuseSession>
 where
     ClientBuilder: FnOnce(&CliArgs) -> anyhow::Result<(Client, Runtime, S3Personality)>,
     Client: ObjectClient + Send + Sync + Clone + 'static,
+    NamespaceBuilder: FnOnce(&CliArgs, Client, S3Personality) -> anyhow::Result<Namespace>,
+    Namespace: namespace::Namespace + Send + Sync + 'static,
     Runtime: Spawn + Send + Sync + 'static,
 {
     tracing::info!("mount-s3 {}", build_info::FULL_VERSION);
@@ -650,6 +680,7 @@ where
     }
 
     let (client, runtime, s3_personality) = client_builder(&args)?;
+    let namespace = namespace_builder(&args, client.clone(), s3_personality)?;
 
     let bucket_description = args.bucket_description();
     tracing::debug!("using S3 personality {s3_personality:?} for {bucket_description}");
@@ -711,6 +742,8 @@ where
     }
     filesystem_config.cache_config = CacheConfig::new(metadata_cache_ttl);
 
+    let prefix = args.prefix.unwrap_or_default();
+
     if let Some(path) = args.cache {
         let cache_config = match args.max_cache_size {
             // Fallback to no data cache.
@@ -730,10 +763,11 @@ where
             let cache = DiskDataCache::new(managed_cache_dir.as_path_buf(), cache_config);
             let prefetcher = caching_prefetch(cache, runtime, prefetcher_config);
             let mut fuse_session = create_filesystem(
+                namespace,
                 client,
                 prefetcher,
                 &args.bucket_name,
-                &args.prefix.unwrap_or_default(),
+                &prefix,
                 filesystem_config,
                 fuse_config,
                 &bucket_description,
@@ -749,17 +783,19 @@ where
 
     let prefetcher = default_prefetch(runtime, prefetcher_config);
     create_filesystem(
+        namespace,
         client,
         prefetcher,
         &args.bucket_name,
-        &args.prefix.unwrap_or_default(),
+        &prefix,
         filesystem_config,
         fuse_config,
         &bucket_description,
     )
 }
 
-fn create_filesystem<Client, Prefetcher>(
+fn create_filesystem<Namespace, Client, Prefetcher>(
+    namespace: Namespace,
     client: Client,
     prefetcher: Prefetcher,
     bucket_name: &str,
@@ -769,15 +805,11 @@ fn create_filesystem<Client, Prefetcher>(
     bucket_description: &str,
 ) -> anyhow::Result<FuseSession>
 where
+    Namespace: namespace::Namespace + Send + Sync + 'static,
     Client: ObjectClient + Send + Sync + Clone + 'static,
     Prefetcher: Prefetch + Send + Sync + 'static,
 {
-    let superblock_config = SuperblockConfig {
-        cache_config: filesystem_config.cache_config.clone(),
-        s3_personality: filesystem_config.s3_personality,
-    };
-    let ns = Superblock::new(bucket_name, prefix, client.clone(), superblock_config);
-    let fs = S3FuseFilesystem::new(ns, client, prefetcher, bucket_name, prefix, filesystem_config);
+    let fs = S3FuseFilesystem::new(namespace, client, prefetcher, bucket_name, prefix, filesystem_config);
     let session = Session::new(fs, &fuse_session_config.mount_point, &fuse_session_config.options)
         .context("Failed to create FUSE session")?;
     let session = FuseSession::new(session, fuse_session_config.max_threads).context("Failed to start FUSE session")?;

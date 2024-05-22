@@ -1,0 +1,13 @@
+[package]
+name = "mountpoint-s3-manifest"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/awslabs/mountpoint-s3"
+publish = false
+
+[dependencies]
+anyhow = { version = "1.0.64", features = ["backtrace"] }
+async-trait = "0.1.57"
+mountpoint-s3 = { version = "*", path = "../mountpoint-s3" }
+time = { version = "0.3.17", features = ["macros", "formatting"] }

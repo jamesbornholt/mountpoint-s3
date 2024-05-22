@@ -20,7 +20,7 @@ use mountpoint_s3_client::mock_client::{MockClientConfig, MockObject};
 use mountpoint_s3_client::types::ETag;
 
 fn main() -> anyhow::Result<()> {
-    mountpoint_s3::cli::main(create_mock_client)
+    mountpoint_s3::cli::main(create_mock_client, mountpoint_s3::cli::create_bucket_namespace)
 }
 
 fn create_mock_client(args: &CliArgs) -> anyhow::Result<(Arc<ThroughputMockClient>, ThreadPool, S3Personality)> {
